@@ -1,17 +1,19 @@
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
 # Install dependencies first (cached layer)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy agent script
+# Copy the agent and the strategy/measurement engine
 COPY trader.py .
+COPY strategy_lab.py .
 
-# Railway needs this
+# Unbuffered logs so Railway shows output live
 ENV PYTHONUNBUFFERED=1
 
-# Run the agent
+# Default to PAPER mode (override TRADING_MODE=LIVE in Railway vars to go live)
+ENV TRADING_MODE=PAPER
+
 CMD ["python", "trader.py"]
