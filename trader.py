@@ -29,6 +29,10 @@ SCAN_INTERVAL   = int(os.getenv("SCAN_INTERVAL_SECS", "30"))        # 30 seconds
 MAX_POSITIONS   = int(os.getenv("MAX_CONCURRENT_POSITIONS", "8"))   # 8 max open
 WEBHOOK_URL     = os.getenv("CLAUDE_WEBHOOK_URL", "")               # optional
 
+# FREE Push Alert config (ntfy.sh - no signup, no app passwords)
+NTFY_TOPIC      = os.getenv("NTFY_TOPIC", "")  # e.g. martin-trading-alerts-8821
+NTFY_SERVER     = os.getenv("NTFY_SERVER", "https://ntfy.sh")
+
 ET = pytz.timezone("America/New_York")
 
 # ── STATE ──────────────────────────────────────────────────────────────────
@@ -310,6 +314,16 @@ def execute_buy(ticker, sector, source, reason, confidence):
     # Notify Claude webhook (if configured) to execute via Robinhood MCP
     notify_claude("BUY", ticker, MAX_POSITION, reason, confidence)
 
+    # Send SMS alert so you can confirm execution in Claude chat
+    sms_msg = (
+        f"Amount: ${MAX_POSITION:.0f}\n"
+        f"Confidence: {confidence}%\n"
+        f"Source: {source}\n"
+        f"Reason: {reason[:80]}\n\n"
+        f'Reply to Claude: "buy {ticker} ${MAX_POSITION:.0f}"'
+    )
+    send_sms_alert(sms_msg, title=f"\U0001F7E2 BUY SIGNAL: {ticker}", priority="high")
+
     # Track locally (price unknown without live feed — use 0 as placeholder)
     positions[ticker] = {
         "ticker": ticker,
@@ -330,6 +344,13 @@ def execute_sell(ticker, reason):
 
     log(f"SELL {ticker} | {reason}", "SELL")
     notify_claude("SELL", ticker, 0, reason, 0)
+
+    sms_msg = (
+        f"Reason: {reason}\n\n"
+        f'Reply to Claude: "sell {ticker}"'
+    )
+    send_sms_alert(sms_msg, title=f"\U0001F534 SELL SIGNAL: {ticker}", priority="high")
+
     del positions[ticker]
 
 
@@ -345,6 +366,31 @@ def close_all_positions(reason="EOD auto-close"):
 
 
 # ── CLAUDE WEBHOOK ────────────────────────────────────────────────────────
+
+def send_sms_alert(message, title="Trading Agent Alert", priority="default"):
+    """Send a free push notification via ntfy.sh - no signup, no app password."""
+    if not NTFY_TOPIC:
+        log("Push alerts not configured \u2014 set NTFY_TOPIC env var", "WARN")
+        return
+    try:
+        url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
+        resp = requests.post(
+            url,
+            data=message.encode("utf-8"),
+            headers={
+                "Title": title,
+                "Priority": priority,   # "default", "high", or "urgent"
+                "Tags": "chart_with_upwards_trend",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            log("Push alert sent (free, via ntfy.sh) \u2705", "INFO")
+        else:
+            log(f"Push send failed: {resp.status_code}", "ERROR")
+    except Exception as e:
+        log(f"Push send error: {e}", "ERROR")
+
 
 def notify_claude(action, ticker, amount_usd, reason, confidence):
     """
