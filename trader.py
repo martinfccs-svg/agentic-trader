@@ -1,11 +1,21 @@
 """
-Agentic Trading Agent v3.0
+Agentic Trading Agent v3.1
 ==========================
-Scans Reddit, Twitter, YouTube, Quora, StockTwits, STOCK Act, Form 4,
-DOD news, and FDA alerts for trading signals across the ENTIRE market.
+Scans Reddit, StockTwits, STOCK Act, and SEC Form 4 for trading signals
+across the US market.
 
-Runs 24/7 on Railway — no computer needed.
-Executes trades via Robinhood Agentic MCP through Claude.
+Runs 24/7 on Railway. Sends alerts; trades are executed by a human in chat
+(via Robinhood Agentic MCP through Claude).
+
+v3.1 changes:
+  - Live price feed (get_price)
+  - Take-profit / stop-loss now actually enforced every scan (monitor_positions)
+  - Daily loss limit now actually halts new buys
+  - Realized P&L + win/loss tracking -> a real (estimated) win rate
+
+NOTE: the agent only alerts; you place the trade. So recorded entry prices are
+the price seen at signal time, not your real fill. P&L is therefore an ESTIMATE.
+Your brokerage account is the source of truth.
 """
 
 import time
@@ -36,12 +46,15 @@ NTFY_SERVER     = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 ET = pytz.timezone("America/New_York")
 
 # ── STATE ──────────────────────────────────────────────────────────────────
-positions        = {}   # {ticker: {shares, cost, sector, source}}
+positions        = {}   # {ticker: {shares, entry_price, sector, source, ...}}
 daily_realized   = 0.0
 total_trades     = 0
 scan_count       = 0
 signals_fired    = 0
 discovered       = set()
+wins             = 0
+losses           = 0
+_last_day        = None  # tracks trading day for daily P&L reset
 
 def log(msg, level="INFO"):
     now = datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S ET")
@@ -76,7 +89,7 @@ def scan_reddit():
         "wallstreetbets", "stocks", "investing",
         "smallcaps", "SecurityAnalysis", "options"
     ]
-    headers = {"User-Agent": "AgenticTrader/3.0 (trading signal scanner)"}
+    headers = {"User-Agent": "AgenticTrader/3.1 (trading signal scanner)"}
 
     for sub in subreddits:
         try:
@@ -213,7 +226,7 @@ def scan_sec_form4():
     try:
         # OpenInsider latest cluster buys — free, no auth needed
         url = "http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=1&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=1&xp=1&xs=1&vl=25&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=20&page=1"
-        r = requests.get(url, timeout=15, headers={"User-Agent": "AgenticTrader/3.0"})
+        r = requests.get(url, timeout=15, headers={"User-Agent": "AgenticTrader/3.1"})
 
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(r.text, "html.parser")
@@ -250,6 +263,50 @@ def scan_sec_form4():
         log(f"Form 4 scan error: {e}", "ERROR")
 
     return signals
+
+
+# ── PRICE FEED & P&L ───────────────────────────────────────────────────────
+
+def get_price(ticker):
+    """Last trade price via Yahoo's unofficial chart endpoint.
+    Returns a float, or None if unavailable. Unofficial API — can break."""
+    try:
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/"
+               f"{ticker}?interval=1m&range=1d")
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code != 200:
+            return None
+        meta = r.json()["chart"]["result"][0]["meta"]
+        price = meta.get("regularMarketPrice")
+        return float(price) if price else None
+    except Exception as e:
+        log(f"Price fetch {ticker} error: {e}", "ERROR")
+        return None
+
+
+def reset_daily_pnl():
+    """Reset realized P&L at the start of a trading day."""
+    global daily_realized, _last_day
+    daily_realized = 0.0
+    _last_day = datetime.now(ET).date()
+    log("Daily realized P&L reset to $0", "INFO")
+
+
+def monitor_positions():
+    """Check every open position against take-profit and stop-loss."""
+    for ticker in list(positions.keys()):
+        pos = positions[ticker]
+        entry = pos.get("entry_price")
+        if not entry:
+            continue
+        price = get_price(ticker)
+        if not price:
+            continue
+        change = (price - entry) / entry   # e.g. +0.034 = +3.4%
+        if change >= TAKE_PROFIT:
+            execute_sell(ticker, f"Take-profit +{change*100:.1f}%")
+        elif change <= -STOP_LOSS:
+            execute_sell(ticker, f"Stop-loss {change*100:.1f}%")
 
 
 # ── SIGNAL PROCESSING ─────────────────────────────────────────────────────
@@ -305,18 +362,30 @@ def process_signal(sig):
 # ── TRADE EXECUTION ───────────────────────────────────────────────────────
 
 def execute_buy(ticker, sector, source, reason, confidence):
-    """Place a buy order via Robinhood Agentic."""
+    """Place a buy order via Robinhood Agentic (alert-only here)."""
     global positions
 
-    log(f"BUY {ticker} | ${MAX_POSITION:.0f} | Conf:{confidence}% | {source}", "BUY")
+    # HALT new buys if the daily loss limit is already breached
+    if daily_realized <= -DAILY_LOSS_LIM:
+        log(f"Daily loss limit reached (${daily_realized:.0f}) — skipping {ticker}", "WARN")
+        return
+
+    price = get_price(ticker)
+    if not price or price <= 0:
+        log(f"Skip BUY {ticker}: no live price available", "WARN")
+        return
+
+    shares = MAX_POSITION / price
+
+    log(f"BUY {ticker} | ${MAX_POSITION:.0f} @ ~${price:.2f} | Conf:{confidence}% | {source}", "BUY")
     log(f"  Reason: {reason[:80]}", "BUY")
 
     # Notify Claude webhook (if configured) to execute via Robinhood MCP
     notify_claude("BUY", ticker, MAX_POSITION, reason, confidence)
 
-    # Send SMS alert so you can confirm execution in Claude chat
+    # Send push alert so you can confirm execution in Claude chat
     sms_msg = (
-        f"Amount: ${MAX_POSITION:.0f}\n"
+        f"Amount: ${MAX_POSITION:.0f} (~{shares:.2f} sh @ ${price:.2f})\n"
         f"Confidence: {confidence}%\n"
         f"Source: {source}\n"
         f"Reason: {reason[:80]}\n\n"
@@ -324,28 +393,46 @@ def execute_buy(ticker, sector, source, reason, confidence):
     )
     send_sms_alert(sms_msg, title=f"\U0001F7E2 BUY SIGNAL: {ticker}", priority="high")
 
-    # Track locally (price unknown without live feed — use 0 as placeholder)
     positions[ticker] = {
         "ticker": ticker,
         "sector": sector,
         "source": source,
         "confidence": confidence,
         "entry_time": datetime.now(ET).isoformat(),
+        "entry_price": price,
+        "shares": shares,
         "notional": MAX_POSITION,
     }
 
 
 def execute_sell(ticker, reason):
-    """Place a sell order via Robinhood Agentic."""
-    global positions
+    """Close a position and record estimated realized P&L."""
+    global positions, daily_realized, total_trades, wins, losses
 
     if ticker not in positions:
         return
 
-    log(f"SELL {ticker} | {reason}", "SELL")
+    pos = positions[ticker]
+    exit_price = get_price(ticker)
+    pnl = None
+
+    if exit_price and pos.get("entry_price"):
+        pnl = (exit_price - pos["entry_price"]) * pos["shares"]
+        daily_realized += pnl
+        total_trades += 1
+        if pnl >= 0:
+            wins += 1
+        else:
+            losses += 1
+
+    pnl_str = f"{pnl:+.2f}" if pnl is not None else "unknown"
+    log(f"SELL {ticker} | est P&L ${pnl_str} | {reason}", "SELL")
+    log(f"  Daily realized: ${daily_realized:+.2f}", "INFO")
+
     notify_claude("SELL", ticker, 0, reason, 0)
 
     sms_msg = (
+        f"Est P&L: ${pnl_str}\n"
         f"Reason: {reason}\n\n"
         f'Reply to Claude: "sell {ticker}"'
     )
@@ -411,7 +498,7 @@ def notify_claude(action, ticker, amount_usd, reason, confidence):
         "reason": reason,
         "confidence": confidence,
         "timestamp": datetime.now(ET).isoformat(),
-        "agent": "AgenticTrader/3.0",
+        "agent": "AgenticTrader/3.1",
     }
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
@@ -437,11 +524,24 @@ def run_scan():
             log(f"Market closed ({now_str} ET) — watching social signals only", "INFO")
         return
 
-    log(f"── Scan #{scan_count} | {now_str} ET | Positions:{len(positions)}/{MAX_POSITIONS} ──", "SCAN")
+    # Reset realized P&L on a new trading day
+    if _last_day != datetime.now(ET).date():
+        reset_daily_pnl()
+
+    log(f"── Scan #{scan_count} | {now_str} ET | Positions:{len(positions)}/{MAX_POSITIONS} | P&L:${daily_realized:+.0f} ──", "SCAN")
 
     # EOD check — close all positions before market close
     if is_eod():
         close_all_positions("3:50 PM ET auto-close")
+        return
+
+    # Enforce take-profit / stop-loss on everything we hold, every cycle
+    monitor_positions()
+
+    # Stop opening new trades once the daily loss limit is hit
+    if daily_realized <= -DAILY_LOSS_LIM:
+        if scan_count % 10 == 1:
+            log(f"Daily loss limit hit (${daily_realized:.0f}) — monitoring only, no new buys", "WARN")
         return
 
     all_signals = []
@@ -476,28 +576,34 @@ def run_scan():
 
 def print_status():
     """Print agent status every 5 minutes."""
+    closed = wins + losses
+    win_rate = (wins / closed * 100) if closed else 0.0
     log("──────────────────────────────────────────────", "INFO")
     log(f"Status Report @ {datetime.now(ET).strftime('%H:%M ET')}", "INFO")
-    log(f"  Open positions : {len(positions)}", "INFO")
-    log(f"  Tickers found  : {len(discovered)}", "INFO")
-    log(f"  Signals fired  : {signals_fired}", "INFO")
-    log(f"  Scans run      : {scan_count}", "INFO")
-    log(f"  Market open    : {market_is_open()}", "INFO")
+    log(f"  Open positions   : {len(positions)}", "INFO")
+    log(f"  Closed trades    : {closed} ({wins}W / {losses}L)", "INFO")
+    log(f"  Win rate (est)   : {win_rate:.1f}%", "INFO")
+    log(f"  Realized P&L     : ${daily_realized:+.2f} (today, est)", "INFO")
+    log(f"  Tickers found    : {len(discovered)}", "INFO")
+    log(f"  Signals fired    : {signals_fired}", "INFO")
+    log(f"  Scans run        : {scan_count}", "INFO")
+    log(f"  Market open      : {market_is_open()}", "INFO")
     if positions:
-        log(f"  Holdings       : {', '.join(positions.keys())}", "INFO")
+        log(f"  Holdings         : {', '.join(positions.keys())}", "INFO")
     log("──────────────────────────────────────────────", "INFO")
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    log("🚀 Agentic Market Scanner v3.0 starting...", "INFO")
+    log("🚀 Agentic Market Scanner v3.1 starting...", "INFO")
     log(f"  Take profit    : +{TAKE_PROFIT*100:.1f}%", "INFO")
     log(f"  Stop loss      : -{STOP_LOSS*100:.1f}%", "INFO")
     log(f"  Max position   : ${MAX_POSITION:,.0f}", "INFO")
     log(f"  Min confidence : {MIN_CONFIDENCE}%", "INFO")
     log(f"  Social weight  : {SOCIAL_WEIGHT*100:.0f}%", "INFO")
     log(f"  Max positions  : {MAX_POSITIONS}", "INFO")
+    log(f"  Daily loss lim : -${DAILY_LOSS_LIM:,.0f}", "INFO")
     log(f"  EOD close      : {EOD_HOUR}:{EOD_MIN:02d} ET", "INFO")
     log(f"  Scan interval  : {SCAN_INTERVAL}s", "INFO")
     log(f"  Claude webhook : {'SET ✅' if WEBHOOK_URL else 'NOT SET — manual mode'}", "INFO")
@@ -505,12 +611,16 @@ if __name__ == "__main__":
     log("🌍 Scanning ENTIRE US equity market — no ticker restrictions", "INFO")
     log("", "INFO")
 
+    # Initialize the trading day so P&L tracking starts clean
+    reset_daily_pnl()
+
     # Run immediately on startup
     run_scan()
 
     # Schedule recurring scan
     schedule.every(SCAN_INTERVAL).seconds.do(run_scan)
     schedule.every(5).minutes.do(print_status)
+    schedule.every().day.at("09:30").do(reset_daily_pnl)
     schedule.every().day.at("15:50").do(lambda: close_all_positions("Scheduled EOD"))
     schedule.every().day.at("09:31").do(lambda: log("🔔 Market OPEN — agent active", "INFO"))
     schedule.every().day.at("16:01").do(lambda: log("🔕 Market CLOSED — monitoring only", "INFO"))
