@@ -68,6 +68,13 @@ MIN_DOLLAR_VOL  = float(os.getenv("MIN_DOLLAR_VOL", "5000000"))
 REDDIT_MIN_SCORE = int(os.getenv("REDDIT_MIN_SCORE", "100"))
 REDDIT_MIN_RATIO = float(os.getenv("REDDIT_MIN_RATIO", "0.70"))
 REDDIT_BUY_RATIO = float(os.getenv("REDDIT_BUY_RATIO", "0.80"))
+# Reddit OAuth (app-only). Register a "script" app at reddit.com/prefs/apps to
+# get the id/secret. Without these, Reddit is skipped cleanly (no public-endpoint
+# hammering). User agent must be descriptive incl. your username per Reddit rules.
+REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_USER_AGENT    = os.getenv(
+    "REDDIT_USER_AGENT", "python:agentic-trader:v4.1 (by /u/your_username)")
 EOD_HOUR        = int(os.getenv("EOD_CLOSE_HOUR", "15"))
 EOD_MIN         = int(os.getenv("EOD_CLOSE_MIN", "50"))
 WEBHOOK_URL     = os.getenv("CLAUDE_WEBHOOK_URL", "")
@@ -155,6 +162,37 @@ def record_api_success(source_name):
     api_failures[source_name] = 0
 
 
+_reddit_token_cache = {"value": None, "expires": 0}
+
+
+def _reddit_oauth_token():
+    """App-only OAuth bearer token (client_credentials grant), cached until it
+    nears expiry. Returns None if credentials aren't configured."""
+    if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET):
+        return None
+    now = time.time()
+    if _reddit_token_cache["value"] and now < _reddit_token_cache["expires"]:
+        return _reddit_token_cache["value"]
+    try:
+        r = requests.post(
+            "https://www.reddit.com/api/v1/access_token",
+            auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
+            data={"grant_type": "client_credentials"},
+            headers={"User-Agent": REDDIT_USER_AGENT},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            log(f"Reddit OAuth: HTTP {r.status_code}", "WARN")
+            return None
+        tok = r.json()
+        _reddit_token_cache["value"] = tok["access_token"]
+        _reddit_token_cache["expires"] = now + tok.get("expires_in", 3600) - 60
+        return _reddit_token_cache["value"]
+    except Exception as e:
+        log(f"Reddit OAuth error: {type(e).__name__}", "WARN")
+        return None
+
+
 # Common ALL-CAPS words/acronyms that are not tickers (or are words that
 # collide with tickers). Used to filter bare-word matches in Reddit titles.
 # Bare matches are WATCH-only, so this list being imperfect is low-stakes.
@@ -184,12 +222,19 @@ def scan_reddit():
     ok_count = 0
     subreddits = ["wallstreetbets", "stocks", "investing", "smallcaps",
                   "SecurityAnalysis", "options"]
-    headers = {"User-Agent": "AgenticTrader/4.1 (signal scanner)"}
+
+    # OAuth is required: the public hot.json endpoint gets 403'd from cloud IPs.
+    # No credentials -> skip cleanly rather than hammer and trip the breaker.
+    token = _reddit_oauth_token()
+    if not token:
+        log("Reddit skipped: no OAuth credentials (set REDDIT_CLIENT_ID/SECRET)", "SOCIAL")
+        return signals
+    headers = {"Authorization": f"bearer {token}", "User-Agent": REDDIT_USER_AGENT}
 
     for sub in subreddits:
         try:
             start = time.time()
-            url = f"https://www.reddit.com/r/{sub}/hot.json?limit=15"
+            url = f"https://oauth.reddit.com/r/{sub}/hot?limit=15"
             r = requests.get(url, headers=headers, timeout=8)
             elapsed = time.time() - start
 
@@ -356,7 +401,7 @@ def scan_sec_form4():
     try:
         start = time.time()
         url = (
-            "http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=1&fdr=&td=0"
+            "https://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=1&fdr=&td=0"
             "&tdr=&daysago=1&xp=1&xs=1&vl=25&cnt=20&page=1&sortcol=0"
         )
         r = requests.get(url, timeout=10, headers={"User-Agent": "AgenticTrader/4.1"})
