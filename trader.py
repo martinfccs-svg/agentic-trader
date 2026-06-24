@@ -75,6 +75,12 @@ REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
 REDDIT_USER_AGENT    = os.getenv(
     "REDDIT_USER_AGENT", "python:agentic-trader:v4.1 (by /u/your_username)")
+# SEC EDGAR (authoritative Form 4 source, replaces the openinsider scrape).
+# SEC REQUIRES a descriptive User-Agent with contact info; set SEC_USER_AGENT to
+# something like "agentic-trader you@example.com" or EDGAR will block requests.
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "agentic-trader (set SEC_USER_AGENT to your email)")
+SEC_FORM4_MAX_FILINGS = int(os.getenv("SEC_FORM4_MAX_FILINGS", "30"))
+_seen_form4_accessions = set()
 EOD_HOUR        = int(os.getenv("EOD_CLOSE_HOUR", "15"))
 EOD_MIN         = int(os.getenv("EOD_CLOSE_MIN", "50"))
 WEBHOOK_URL     = os.getenv("CLAUDE_WEBHOOK_URL", "")
@@ -391,51 +397,113 @@ def scan_sec_stock_act():
     return signals[:10]
 
 
+def _parse_form4_atom(atom_text):
+    """Parse the EDGAR getcurrent atom feed into a list of Form 4 filing refs.
+    Each ref: {accession, cik, acc_nodash}. Skips 4/A amendments (term != '4')."""
+    import xml.etree.ElementTree as ET
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    out = []
+    root = ET.fromstring(atom_text)
+    for entry in root.findall("a:entry", ns):
+        cat = entry.find("a:category", ns)
+        term = (cat.get("term").strip() if (cat is not None and cat.get("term")) else "")
+        if term != "4":
+            continue
+        link = entry.find("a:link", ns)
+        href = (link.get("href") if (link is not None and link.get("href")) else "")
+        ent_id = entry.findtext("a:id", "", ns) or ""
+        accession = ent_id.split("=")[-1].strip() if "=" in ent_id else ""
+        cik = acc_nodash = ""
+        marker = "/Archives/edgar/data/"
+        if marker in href:
+            tail = href.split(marker, 1)[1].split("/")
+            if len(tail) >= 2:
+                cik, acc_nodash = tail[0], tail[1]
+        if accession and cik and acc_nodash:
+            out.append({"accession": accession, "cik": cik, "acc_nodash": acc_nodash})
+    return out
+
+
+def _parse_form4_ownership(text):
+    """From a Form 4 submission, return (issuer_symbol, num_open_market_buys).
+    Counts only non-derivative transactions with code 'P' (open-market purchase)
+    and acquired/disposed 'A'. Returns (None, 0) if it can't be parsed."""
+    import xml.etree.ElementTree as ET
+    start = text.find("<ownershipDocument>")
+    end = text.find("</ownershipDocument>")
+    if start == -1 or end == -1:
+        return None, 0
+    try:
+        root = ET.fromstring(text[start:end + len("</ownershipDocument>")])
+    except ET.ParseError:
+        return None, 0
+    symbol = (root.findtext("issuer/issuerTradingSymbol") or "").strip().upper()
+    buys = 0
+    for txn in root.findall("nonDerivativeTable/nonDerivativeTransaction"):
+        code = (txn.findtext("transactionCoding/transactionCode") or "").strip()
+        ad = (txn.findtext("transactionAmounts/transactionAcquiredDisposedCode/value") or "").strip()
+        if code == "P" and ad == "A":
+            buys += 1
+    return (symbol or None), buys
+
+
 def scan_sec_form4():
-    """SEC Form 4 insider buys via OpenInsider, with timeout and error handling."""
+    """SEC Form 4 open-market insider buys, pulled directly from EDGAR.
+    Reads the official getcurrent feed, then each new filing's ownership XML to
+    confirm an open-market purchase (transaction code 'P'). Replaces the fragile
+    openinsider.com scrape; EDGAR is authoritative and won't silently move or
+    IP-block legitimate, throttled access with a contact User-Agent."""
     if should_skip_api("sec_form4"):
         log("SEC Form 4 skipped (circuit breaker active)", "API")
         return []
 
     signals = []
+    headers = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
     try:
         start = time.time()
-        url = (
-            "https://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=1&fdr=&td=0"
-            "&tdr=&daysago=1&xp=1&xs=1&vl=25&cnt=20&page=1&sortcol=0"
-        )
-        r = requests.get(url, timeout=10, headers={"User-Agent": "AgenticTrader/4.1"})
-        elapsed = time.time() - start
-
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(r.text, "html.parser")
-        table = soup.find("table", {"class": "tinytable"})
-
-        if not table:
-            log(f"SEC Form 4: No table found ({elapsed:.1f}s)", "WARN")
+        feed_url = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent"
+                    "&type=4&company=&dateb=&owner=only&start=0&count=100&output=atom")
+        r = requests.get(feed_url, headers=headers, timeout=12)
+        if r.status_code != 200:
+            log(f"SEC Form 4 feed: HTTP {r.status_code}", "WARN")
             record_api_failure("sec_form4")
             return signals
 
-        for row in table.find_all("tr")[1:16]:
-            cols = row.find_all("td")
-            if len(cols) < 8:
-                continue
-            try:
-                ticker = cols[3].get_text(strip=True).upper()
-                if "P" in cols[6].get_text(strip=True):
-                    signals.append({
-                        "ticker": ticker, "source": "SEC Form 4",
-                        "headline": f"Insider buy {ticker}",
-                        "confidence": 88, "action": "BUY"
-                    })
-            except:
-                continue
+        filings = _parse_form4_atom(r.text)
+        # Only fetch filings we haven't processed; cap per scan for fair access.
+        fresh = [f for f in filings if f["accession"] not in _seen_form4_accessions]
+        fresh = fresh[:SEC_FORM4_MAX_FILINGS]
 
+        for f in fresh:
+            _seen_form4_accessions.add(f["accession"])
+            doc_url = (f"https://www.sec.gov/Archives/edgar/data/"
+                       f"{f['cik']}/{f['acc_nodash']}/{f['accession']}.txt")
+            try:
+                d = requests.get(doc_url, headers=headers, timeout=10)
+                if d.status_code != 200:
+                    continue
+                symbol, buys = _parse_form4_ownership(d.text)
+                if symbol and buys > 0:
+                    signals.append({
+                        "ticker": symbol, "source": "SEC Form 4",
+                        "headline": f"Insider open-market buy {symbol}",
+                        "confidence": 88, "action": "BUY",
+                        "accession": f["accession"],
+                    })
+            except requests.RequestException:
+                continue
+            time.sleep(0.2)   # ~5 req/s, well under SEC's 10 req/s ceiling
+
+        if len(_seen_form4_accessions) > 8000:   # bound the dedup memory
+            _seen_form4_accessions.clear()
+
+        elapsed = time.time() - start
         record_api_success("sec_form4")
-        log(f"SEC Form 4 scan: {len(signals)} insider buys ({elapsed:.1f}s)", "INSIDER")
+        log(f"SEC Form 4 scan: {len(signals)} insider buys "
+            f"({len(fresh)} new filings, {elapsed:.1f}s)", "INSIDER")
 
     except requests.Timeout:
-        log("SEC Form 4: TIMEOUT (>10s)", "ERROR")
+        log("SEC Form 4: TIMEOUT", "ERROR")
         record_api_failure("sec_form4")
     except requests.ConnectionError as e:
         log(f"SEC Form 4: CONNECTION ERROR - {str(e)[:50]}", "ERROR")
