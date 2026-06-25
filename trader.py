@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 import strategy_lab as lab   # CostModel, RiskConfig, fetch_history, report, Trade
+from data_sources import sec_get, SEC_LATEST_FORM4, DataSourceError
 
 # -- LOGGING SETUP --
 logging.basicConfig(
@@ -449,31 +450,21 @@ def _parse_form4_ownership(text):
 
 def scan_sec_form4():
     """SEC Form 4 open-market insider buys, pulled directly from EDGAR.
-    Reads the official getcurrent feed, then each new filing's ownership XML to
-    confirm an open-market purchase (transaction code 'P'). Replaces the fragile
-    openinsider.com scrape; EDGAR is authoritative and won't silently move or
-    IP-block legitimate, throttled access with a contact User-Agent."""
+    Uses resilient HTTP client with proper User-Agent and rate limiting."""
     if should_skip_api("sec_form4"):
         log("SEC Form 4 skipped (circuit breaker active)", "API")
         return []
 
     signals = []
-    headers = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
     try:
         start = time.time()
-        feed_url = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent"
-                    "&type=4&company=&dateb=&owner=only&start=0&count=100&output=atom")
-        r = requests.get(feed_url, headers=headers, timeout=12)
-        if r.status_code != 200:
-            log(f"SEC Form 4 feed: HTTP {r.status_code}", "WARN")
-            record_api_failure("sec_form4")
-            return signals
-
+        r = sec_get(SEC_LATEST_FORM4)
+        
         filings = _parse_form4_atom(r.text)
-        # Only fetch filings we haven't processed; cap per scan for fair access.
         fresh = [f for f in filings if f["accession"] not in _seen_form4_accessions]
         fresh = fresh[:SEC_FORM4_MAX_FILINGS]
 
+        headers = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
         for f in fresh:
             _seen_form4_accessions.add(f["accession"])
             doc_url = (f"https://www.sec.gov/Archives/edgar/data/"
@@ -492,9 +483,9 @@ def scan_sec_form4():
                     })
             except requests.RequestException:
                 continue
-            time.sleep(0.2)   # ~5 req/s, well under SEC's 10 req/s ceiling
+            time.sleep(0.2)
 
-        if len(_seen_form4_accessions) > 8000:   # bound the dedup memory
+        if len(_seen_form4_accessions) > 8000:
             _seen_form4_accessions.clear()
 
         elapsed = time.time() - start
@@ -502,6 +493,9 @@ def scan_sec_form4():
         log(f"SEC Form 4 scan: {len(signals)} insider buys "
             f"({len(fresh)} new filings, {elapsed:.1f}s)", "INSIDER")
 
+    except DataSourceError as e:
+        log(f"SEC Form 4: {e}", "WARN")
+        record_api_failure("sec_form4")
     except requests.Timeout:
         log("SEC Form 4: TIMEOUT", "ERROR")
         record_api_failure("sec_form4")
@@ -513,7 +507,6 @@ def scan_sec_form4():
         record_api_failure("sec_form4")
 
     return signals
-
 
 # -- PRICE & LIQUIDITY --
 def get_price(ticker):
