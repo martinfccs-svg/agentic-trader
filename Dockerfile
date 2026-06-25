@@ -6,9 +6,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the agent and the strategy/measurement engine
+# Copy the agent, strategy engine, and data sources
 COPY trader.py .
 COPY strategy_lab.py .
+COPY data_sources.py .
 
 # Unbuffered logs so Railway shows output live
 ENV PYTHONUNBUFFERED=1
@@ -17,3 +18,4 @@ ENV PYTHONUNBUFFERED=1
 ENV TRADING_MODE=PAPER
 
 CMD ["python", "trader.py"]
+
