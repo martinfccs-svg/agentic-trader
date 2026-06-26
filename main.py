@@ -83,4 +83,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true", help="run continuously (deploy shape)")
     args = ap.parse_args()
-    run(loop=args.loop)
+    try:
+        run(loop=args.loop)
+    except Exception as e:
+        log.error("Fatal error: %s", e, exc_info=True)
+        raise
