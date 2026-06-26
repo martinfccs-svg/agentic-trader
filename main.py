@@ -1,3 +1,4 @@
+import sys; print("MAIN.PY STARTED", file=sys.stderr, flush=True)
 def run(loop: bool, cycles: int = 40) -> None:
     print("DEBUG: Starting build()", flush=True)
     try:
