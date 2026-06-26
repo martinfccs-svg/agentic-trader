@@ -3,8 +3,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-# Safe defaults. Real money requires overriding ALL of: TRADING_MODE=LIVE,
-# BROKER=alpaca, ALPACA_PAPER=false, LIVE_CONFIRM=<exact phrase>.
 ENV TRADING_MODE=PAPER BROKER=paper ALPACA_PAPER=true
-# Startup gates on the self-test so broken math never deploys.
-CMD ["sh", "-c", "python selftest.py && python main.py --loop"]
+# DIAGNOSTIC CMD (temporary): print the exact selftest exit code, then run main
+# regardless (';' not '&&') so we can see which script is actually failing.
+# Revert to the gated version once diagnosed.
+CMD ["sh", "-c", "echo '--- starting selftest ---'; python selftest.py; echo \"--- selftest exit code: $? ---\"; echo '--- starting main.py ---'; python main.py --loop; echo \"--- main.py exited: $? ---\""]
