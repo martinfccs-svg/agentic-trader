@@ -107,23 +107,32 @@ class Endpoint:
 
 
 ENDPOINTS: dict[str, Endpoint] = {
-    "insider": Endpoint("insider", "stock_insider_transactions",
-                        FeedCriticality.SIGNAL, 120, premium_uncertain=True),
-    "congressional": Endpoint("congressional", "congressional_trading",
-                              FeedCriticality.SIGNAL, 300, premium_uncertain=True),
-    "social": Endpoint("social", "stock_social_sentiment",
-                       FeedCriticality.SIGNAL, 300, premium_uncertain=True),
+    # DISABLED: insider endpoint hits rate limits (429) even on paid tier
+    # "insider": Endpoint("insider", "stock_insider_transactions",
+    #                     FeedCriticality.SIGNAL, 120, premium_uncertain=True),
+    
+    # DISABLED: congressional endpoint has SDK bug (missing required args)
+    # "congressional": Endpoint("congressional", "congressional_trading",
+    #                           FeedCriticality.SIGNAL, 300, premium_uncertain=True),
+    
+    # DISABLED: social endpoint is premium-gated (403 Forbidden)
+    # "social": Endpoint("social", "stock_social_sentiment",
+    #                    FeedCriticality.SIGNAL, 300, premium_uncertain=True),
+    
+    # ENABLED: real-time quote data (working)
     "quote": Endpoint("quote", "quote", FeedCriticality.PRICE, 5),
+    
+    # ENABLED: historical candle data (working, critical for swing/intraday)
     "candle": Endpoint("candle", "stock_candles", FeedCriticality.PRICE, 60),
 }
 
 SYSTEM_REQUIRED_FEEDS: dict[System, list[str]] = {
-    System.SWING:    ["insider", "congressional", "candle"],
-    System.INTRADAY: ["social", "quote", "candle"],
+    System.SWING:    ["candle"],  # swing uses candle only (no insider/congressional)
+    System.INTRADAY: ["quote", "candle"],  # intraday uses quote + candle (no social)
 }
 
 SOURCE_TO_SYSTEM: dict[SignalSource, System] = {
-    SignalSource.INSIDER:       System.SWING,
-    SignalSource.CONGRESSIONAL: System.SWING,
-    SignalSource.SOCIAL:        System.INTRADAY,
+    # SignalSource.INSIDER:       System.SWING,  # DISABLED
+    # SignalSource.CONGRESSIONAL: System.SWING,  # DISABLED
+    # SignalSource.SOCIAL:        System.INTRADAY,  # DISABLED
 }
