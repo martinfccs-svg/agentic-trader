@@ -1,7 +1,3 @@
-import sys
-sys.stderr.write("=== MAIN.PY STARTED ===\n")
-sys.stderr.flush()
-
 """Orchestration for agentic-trader v5.
 
 Runs out of the box: with no FINNHUB_API_KEY it uses the SimulatedFeed so you
@@ -14,8 +10,10 @@ data (after you've confirmed access via verify_endpoints.py).
 
 from __future__ import annotations
 
-sys.stderr.write("DEBUG: About to import argparse\n")
+import sys
+sys.stderr.write("=== MAIN.PY STARTED ===\n")
 sys.stderr.flush()
+
 import argparse
 sys.stderr.write("DEBUG: argparse imported\n")
 sys.stderr.flush()
