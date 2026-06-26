@@ -60,11 +60,20 @@ def run(loop: bool, cycles: int = 40) -> None:
     sim = isinstance(feed, SimulatedFeed)
     n = 10_000_000 if loop else cycles
     for i in range(n):
-        one_cycle(feed, kill, swing, intraday, router)
+        try:
+            one_cycle(feed, kill, swing, intraday, router)
+        except Exception as e:
+            log.error("Cycle %d failed: %s", i, e, exc_info=True)
+            if not loop:
+                raise
+            time.sleep(5)  # backoff before retry
+            continue
+        
         if sim:
             feed.step_prices()      # advance synthetic market
         if loop:
             time.sleep(5)
+    
     # End of (simulated) session: flatten intraday, keep swing overnight.
     intraday.flatten_all("session end")
     logger.print_scorecard(broker)
