@@ -32,6 +32,9 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 RATE_LIMIT_CALLS = _i("RATE_LIMIT_CALLS", 140)
 RATE_LIMIT_WINDOW_SECONDS = 60
 
+# Seconds between trading cycles in --loop mode.
+SCAN_INTERVAL_SECS = _i("SCAN_INTERVAL_SECS", 5)
+
 DAILY_RESOLUTION = "D"                       # swing system
 INTRADAY_RESOLUTION = os.environ.get("INTRADAY_RESOLUTION", "1")  # 1-min
 DAILY_LOOKBACK_DAYS = _i("DAILY_LOOKBACK_DAYS", 120)
