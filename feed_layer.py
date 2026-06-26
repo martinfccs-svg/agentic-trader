@@ -139,6 +139,9 @@ class FinnhubFeed(_HealthMixin):
         self._universe = tickers
 
     def _call(self, key: str, *args, **kwargs):
+        # Skip if endpoint is disabled in config
+        if key not in ENDPOINTS:
+            return None
         breaker = self._breakers[key]
         if not breaker.allow_request():
             return None
@@ -177,22 +180,29 @@ class FinnhubFeed(_HealthMixin):
     def get_signals(self) -> list[Signal]:
         signals: list[Signal] = []
         for ticker in self._universe:
-            ins = self._call("insider", ticker)
-            for row in (ins or {}).get("data", []):
-                # Finnhub insider rows expose transactionDate + change (+buy/-sell).
-                if row.get("change", 0) > 0:
-                    signals.append(Signal(SignalSource.INSIDER, ticker,
-                                          transaction_date=row.get("transactionDate"),
-                                          raw=row))
-            cong = self._call("congressional", ticker)
-            for row in (cong or {}).get("data", []):
-                if str(row.get("transactionType", "")).lower().startswith("purchase"):
-                    signals.append(Signal(SignalSource.CONGRESSIONAL, ticker,
-                                          transaction_date=row.get("transactionDate"),
-                                          raw=row))
+            # Only call insider if endpoint is enabled
+            if "insider" in ENDPOINTS:
+                ins = self._call("insider", ticker)
+                for row in (ins or {}).get("data", []):
+                    # Finnhub insider rows expose transactionDate + change (+buy/-sell).
+                    if row.get("change", 0) > 0:
+                        signals.append(Signal(SignalSource.INSIDER, ticker,
+                                              transaction_date=row.get("transactionDate"),
+                                              raw=row))
+            # Only call congressional if endpoint is enabled
+            if "congressional" in ENDPOINTS:
+                cong = self._call("congressional", ticker)
+                for row in (cong or {}).get("data", []):
+                    if str(row.get("transactionType", "")).lower().startswith("purchase"):
+                        signals.append(Signal(SignalSource.CONGRESSIONAL, ticker,
+                                              transaction_date=row.get("transactionDate"),
+                                              raw=row))
         return signals
 
     def get_social_buzz(self, ticker: str) -> Optional[float]:
+        # Only call social if endpoint is enabled
+        if "social" not in ENDPOINTS:
+            return None
         raw = self._call("social", ticker)
         if not raw:
             return None
@@ -242,39 +252,19 @@ class SimulatedFeed(_HealthMixin):
             avg_dollar_volume=avg_dollar_volume(bars), sma=sma(bars.close, 10),
         )
 
-   def get_signals(self) -> list[Signal]:
-    signals: list[Signal] = []
-    for ticker in self._universe:
-        # Only call insider if endpoint is enabled
-        if "insider" in ENDPOINTS:
-            ins = self._call("insider", ticker)
-            for row in (ins or {}).get("data", []):
-                # Finnhub insider rows expose transactionDate + change (+buy/-sell).
-                if row.get("change", 0) > 0:
-                    signals.append(Signal(SignalSource.INSIDER, ticker,
-                                          transaction_date=row.get("transactionDate"),
-                                          raw=row))
-        # Only call congressional if endpoint is enabled
-        if "congressional" in ENDPOINTS:
-            cong = self._call("congressional", ticker)
-            for row in (cong or {}).get("data", []):
-                if str(row.get("transactionType", "")).lower().startswith("purchase"):
-                    signals.append(Signal(SignalSource.CONGRESSIONAL, ticker,
-                                          transaction_date=row.get("transactionDate"),
-                                          raw=row))
-    return signals
-
-def get_social_buzz(self, ticker: str) -> Optional[float]:
-    # Only call social if endpoint is enabled
-    if "social" not in ENDPOINTS:
-        return None
-    raw = self._call("social", ticker)
-    if not raw:
-        return None
-    rows = (raw.get("reddit") or []) + (raw.get("twitter") or [])
-    if not rows:
-        return None
-    return sum(r.get("mention", 0) for r in rows)
+    def get_signals(self) -> list[Signal]:
+        out: list[Signal] = []
+        for t in self._tickers:
+            roll = self._rng.random()
+            if roll < 0.15 and "insider" in ENDPOINTS:
+                out.append(Signal(SignalSource.INSIDER, t,
+                                  transaction_date=_recent_date(self._rng)))
+            elif roll < 0.25 and "congressional" in ENDPOINTS:
+                out.append(Signal(SignalSource.CONGRESSIONAL, t,
+                                  transaction_date=_recent_date(self._rng)))
+            elif roll < 0.45 and "social" in ENDPOINTS:
+                out.append(Signal(SignalSource.SOCIAL, t))
+        return out
 
     def get_social_buzz(self, ticker: str) -> Optional[float]:
         return self._rng.uniform(0, 100)
