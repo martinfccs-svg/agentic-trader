@@ -53,26 +53,15 @@ def one_cycle(feed, kill, swing, intraday, router) -> None:
     intraday.manage_open_positions()
 
 
-def run(loop: bool, cycles: int = 40) -> None:
-    feed, broker, logger, kill, swing, intraday, router = build()
-    log.info("agentic-trader v5 starting in %s mode", TRADING_MODE)
-
-    sim = isinstance(feed, SimulatedFeed)
-    n = 10_000_000 if loop else cycles
-    for i in range(n):
-        try:
-            one_cycle(feed, kill, swing, intraday, router)
-        except Exception as e:
-            log.error("Cycle %d failed: %s", i, e, exc_info=True)
-            if not loop:
-                raise
-            time.sleep(5)  # backoff before retry
-            continue
-        
-        if sim:
-            feed.step_prices()      # advance synthetic market
-        if loop:
-            time.sleep(5)
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--loop", action="store_true", help="run continuously (deploy shape)")
+    args = ap.parse_args()
+    try:
+        run(loop=args.loop)
+    except Exception as e:
+        log.error("Fatal error: %s", e, exc_info=True)
+        raise
     
     # End of (simulated) session: flatten intraday, keep swing overnight.
     intraday.flatten_all("session end")
