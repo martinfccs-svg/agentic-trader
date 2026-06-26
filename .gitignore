@@ -5,6 +5,7 @@ secrets.*
 
 # --- Runtime artifacts ---
 signal_log.jsonl
+trades.jsonl
 *.log
 
 # --- Python ---
