@@ -33,8 +33,15 @@ UNIVERSE = ["HNRG", "TPL", "IX", "KARD", "AAPL", "MSFT", "NVDA", "AMD", "F", "T"
 
 
 def build():
+    if TRADING_MODE == "LIVE":
+        log.info("LIVE mode: using RobinhoodBroker")
+        from robinhood_broker import RobinhoodBroker
+        broker = RobinhoodBroker(os.environ.get("ROBINHOOD_AUTH_TOKEN", ""))
+    else:
+        log.info("PAPER mode: using PaperBroker")
+        broker = PaperBroker(START_EQUITY)
+    
     feed = build_feed(UNIVERSE)
-    broker = PaperBroker(START_EQUITY)
     logger = TradeLogger()
     kill = KillSwitch(feed, broker)
     swing = SwingRiskEngine(feed, broker, kill, logger)
