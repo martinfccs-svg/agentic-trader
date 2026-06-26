@@ -1,6 +1,0 @@
-[build]
-builder = "DOCKERFILE"
-
-[deploy]
-region = "us-east4-eqdc4a"
-restartPolicyType = "always"
