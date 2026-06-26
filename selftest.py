@@ -6,7 +6,8 @@ Checks indicators against hand-computed values, sizing math, broker P&L
 reconciliation (realized vs unrealized never conflated), and kill-switch
 severity. Exits non-zero on failure so CI/Railway can gate on it.
 """
-
+import logging
+log = logging.getLogger("selftest")
 from __future__ import annotations
 
 import sys
