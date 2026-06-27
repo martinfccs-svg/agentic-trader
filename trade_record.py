@@ -36,11 +36,66 @@ class TradeRecord:
     shares: float
     realized_pnl: float
     r_multiple: float  # (exit_price - entry_price) / (entry_price - stop_price)
+    initial_risk: float = 0.0  # dollar risk at entry (shares * (entry - stop))
     recorded_at: float = field(default_factory=time.time)
     
     def to_dict(self) -> dict:
         """Convert to dict for JSON serialization."""
         return asdict(self)
+    
+    @classmethod
+    def build(
+        cls,
+        ticker: str,
+        system: str,
+        source: str,
+        entry_time: float,
+        exit_time: float,
+        entry_price: float,
+        exit_price: float,
+        shares: float,
+        stop_price: float,
+        realized_pnl: float,
+    ) -> TradeRecord:
+        """Build a TradeRecord from raw trade data (used by selftest and manual creation).
+        
+        Args:
+            ticker: Ticker symbol
+            system: "swing" or "intraday"
+            source: Signal source (e.g., "trend", "momentum")
+            entry_time: Unix timestamp of entry
+            exit_time: Unix timestamp of exit
+            entry_price: Entry price
+            exit_price: Exit price
+            shares: Number of shares
+            stop_price: Stop loss price
+            realized_pnl: Realized P&L from the trade
+        
+        Returns:
+            TradeRecord with calculated R-multiple and initial_risk
+        """
+        # Calculate R-multiple: (exit - entry) / (entry - stop)
+        risk = entry_price - stop_price
+        if risk <= 0:
+            r_multiple = 0.0
+        else:
+            r_multiple = (exit_price - entry_price) / risk
+        
+        # Calculate initial risk in dollars
+        initial_risk = shares * risk
+        
+        return cls(
+            ticker=ticker,
+            system=system,
+            entry_time=entry_time,
+            exit_time=exit_time,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            shares=shares,
+            realized_pnl=realized_pnl,
+            r_multiple=r_multiple,
+            initial_risk=initial_risk,
+        )
 
 
 class TradeRecorder:
@@ -69,6 +124,9 @@ class TradeRecorder:
         else:
             r_multiple = (exit_price - position.entry_price) / risk
         
+        # Calculate initial risk in dollars
+        initial_risk = position.shares * risk
+        
         # Create the trade record
         record = TradeRecord(
             ticker=position.ticker,
@@ -80,6 +138,7 @@ class TradeRecorder:
             shares=position.shares,
             realized_pnl=realized_pnl,
             r_multiple=r_multiple,
+            initial_risk=initial_risk,
         )
         
         # Append as JSON line
