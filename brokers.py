@@ -26,6 +26,7 @@ from config import (
     live_money_armed,
 )
 from models import Fill, Position, Side, System
+from trade_record import TradeRecord, TradeRecorder
 
 log = logging.getLogger("broker")
 
@@ -47,7 +48,8 @@ class Broker(Protocol):
 # ============================ PAPER ======================================
 
 class PaperBroker:
-    def __init__(self, start_equity: float = START_EQUITY) -> None:
+    def __init__(self, start_equity: float = START_EQUITY, recorder=None) -> None:
+        self._recorder = recorder
         self.cash = start_equity
         self.start_equity = start_equity
         self.positions: dict[str, Position] = {}
@@ -65,7 +67,7 @@ class PaperBroker:
         self.cash -= fp * shares + COMMISSION_PER_TRADE
         self.fills.append(Fill(ticker, Side.BUY, shares, fp, COMMISSION_PER_TRADE))
         pos = Position(ticker, system, shares, fp, time.time(), stop_price,
-                       source, high_water=fp, last_price=fp)
+                       source, entry_stop=stop_price, high_water=fp, last_price=fp)
         self.positions[ticker] = pos
         log.info("[PAPER] BUY %s x%.4f @ %.4f stop %.4f [%s]",
                  ticker, shares, fp, stop_price, system.value)
@@ -81,7 +83,15 @@ class PaperBroker:
         self.fills.append(Fill(ticker, Side.SELL, pos.shares, fp, COMMISSION_PER_TRADE))
         log.info("[PAPER] SELL %s x%.4f @ %.4f -> %.2f [%s]",
                  ticker, pos.shares, fp, realized, pos.system.value)
+        self._emit(pos, fp, realized)
         return realized
+
+    def _emit(self, pos, exit_price, realized):
+        if self._recorder:
+            self._recorder.record(TradeRecord.build(
+                pos.ticker, pos.system.value, pos.source.value if pos.source else "",
+                pos.entry_time, time.time(), pos.entry_price, exit_price,
+                pos.shares, pos.entry_stop, realized))
 
     def mark(self, ticker, price):
         pos = self.positions.get(ticker)
@@ -110,7 +120,8 @@ class AlpacaBroker:
     config.live_money_armed() to be true; otherwise every order is refused.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, recorder=None) -> None:
+        self._recorder = recorder
         if not (ALPACA_API_KEY and ALPACA_SECRET_KEY):
             raise RuntimeError("BROKER=alpaca but ALPACA_API_KEY/SECRET not set.")
         try:
@@ -134,15 +145,41 @@ class AlpacaBroker:
 
     def buy(self, ticker, shares, price, system, source, stop_price):
         self._guard_live()
-        from alpaca.trading.requests import MarketOrderRequest
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        order = MarketOrderRequest(symbol=ticker, qty=round(shares),
-                                   side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
+        from alpaca.trading.requests import (
+            LimitOrderRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest,
+        )
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from config import MAX_SLIPPAGE_BPS, TAKE_PROFIT_R, USE_BRACKET_ORDERS
+
+        qty = round(shares)
+        if qty <= 0:
+            return None
+
+        if USE_BRACKET_ORDERS:
+            # Marketable LIMIT entry: cap the worst fill we'll accept (slippage guard).
+            limit = round(price * (1 + MAX_SLIPPAGE_BPS / 10_000.0), 2)
+            # Broker-side protective stop + target. These live on Alpaca, so they
+            # trigger even if this bot is down -- the stop no longer dies with us.
+            risk_per_share = max(price - stop_price, 0.01)
+            target = round(price + TAKE_PROFIT_R * risk_per_share, 2)
+            order = LimitOrderRequest(
+                symbol=ticker, qty=qty, side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY, limit_price=limit,
+                order_class=OrderClass.BRACKET,
+                stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+                take_profit=TakeProfitRequest(limit_price=target),
+            )
+            log.warning("[ALPACA] BRACKET BUY %s x%d limit<=%.2f stop=%.2f target=%.2f [%s]",
+                        ticker, qty, limit, stop_price, target, system.value)
+        else:
+            order = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY,
+                                       time_in_force=TimeInForce.DAY)
+            log.warning("[ALPACA] MARKET BUY %s x%d [%s]", ticker, qty, system.value)
+
         self._client.submit_order(order)
-        pos = Position(ticker, system, round(shares), price, time.time(),
-                       stop_price, source, high_water=price, last_price=price)
+        pos = Position(ticker, system, qty, price, time.time(),
+                       stop_price, source, entry_stop=stop_price, high_water=price, last_price=price)
         self.positions[ticker] = pos
-        log.warning("[ALPACA] BUY %s x%d submitted [%s]", ticker, round(shares), system.value)
         return pos
 
     def sell(self, ticker, price):
@@ -154,6 +191,11 @@ class AlpacaBroker:
         self.realized_today += realized
         log.warning("[ALPACA] SELL %s submitted -> est %.2f [%s]",
                     ticker, realized, pos.system.value)
+        if self._recorder:
+            self._recorder.record(TradeRecord.build(
+                pos.ticker, pos.system.value, pos.source.value if pos.source else "",
+                pos.entry_time, time.time(), pos.entry_price, price,
+                pos.shares, pos.entry_stop, realized))
         return realized
 
     def mark(self, ticker, price):
@@ -179,8 +221,8 @@ class AlpacaBroker:
         self.realized_today = 0.0
 
 
-def build_broker():
+def build_broker(recorder=None):
     from config import BROKER
     if BROKER == "alpaca":
-        return AlpacaBroker()
-    return PaperBroker()
+        return AlpacaBroker(recorder=recorder)
+    return PaperBroker(recorder=recorder)
