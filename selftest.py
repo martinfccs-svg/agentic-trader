@@ -67,8 +67,28 @@ def test_live_gate():
     check("live money DISARMED by default", live_money_armed() is False)
 
 
+def test_trade_record_and_mc():
+    print("trade record + monte carlo:")
+    from trade_record import TradeRecord
+    from montecarlo import run_monte_carlo, MIN_TRUSTWORTHY
+    # entry 100, stop 95 -> risk/share 5; 10 shares -> $50 risk. Exit 115 -> +150 pnl -> +3R
+    tr = TradeRecord.build("X", "swing", "trend", 0, 1, 100, 115, 10, 95, 150.0)
+    check("R-multiple = +3R", abs(tr.r_multiple - 3.0) < 1e-9, f"got {tr.r_multiple}")
+    check("initial_risk = 50", abs(tr.initial_risk - 50.0) < 1e-9)
+    # small sample must be flagged untrustworthy
+    few = [TradeRecord.build("X","swing","trend",0,1,100,110,10,95,100.0) for _ in range(5)]
+    r_few = run_monte_carlo(few, start_equity=50_000, runs=200)
+    check("small sample flagged not trustworthy", r_few.trustworthy is False)
+    # all-winning trades -> zero ruin
+    wins = [TradeRecord.build("X","swing","trend",0,1,100,110,10,95,100.0) for _ in range(40)]
+    r_win = run_monte_carlo(wins, start_equity=50_000, runs=500)
+    check("40 winners -> trustworthy", r_win.trustworthy is True)
+    check("40 winners -> ~0 ruin", r_win.prob_ruin == 0.0)
+    check("40 winners -> final > start", r_win.median_final > 50_000)
+
+
 def main():
-    test_indicators(); test_sizing(); test_broker(); test_live_gate()
+    test_indicators(); test_sizing(); test_broker(); test_live_gate(); test_trade_record_and_mc()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
