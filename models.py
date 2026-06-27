@@ -94,6 +94,7 @@ class Position:
     entry_time: float
     stop_price: float
     source: SignalSource
+    entry_stop: float = 0.0   # initial stop, never ratcheted (for R-multiple)
     high_water: float = 0.0
     last_price: Optional[float] = None
 
