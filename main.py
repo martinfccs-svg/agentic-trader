@@ -30,6 +30,7 @@ from safety import market_is_open, near_close, startup_banner
 from scanner import PriceActionScanner
 from swing_engine import SwingRiskEngine
 from trade_logger import TradeLogger
+from trade_record import TradeRecorder
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -38,7 +39,8 @@ log = logging.getLogger("main")
 
 def build():
     feed = build_feed(UNIVERSE)
-    broker = build_broker()
+    recorder = TradeRecorder()          # writes trades.jsonl for Monte Carlo
+    broker = build_broker(recorder=recorder)
     logger = TradeLogger()
     kill = KillSwitch(feed, broker)
     swing = SwingRiskEngine(feed, broker, kill, logger)
