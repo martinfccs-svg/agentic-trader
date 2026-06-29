@@ -87,8 +87,42 @@ def test_trade_record_and_mc():
     check("40 winners -> final > start", r_win.median_final > 50_000)
 
 
+def test_new_strategies():
+    print("new strategies:")
+    from indicators import rsi, trailing_return
+    # RSI of a strictly rising series -> 100 (no losses)
+    check("rsi all-up = 100", rsi(list(range(1, 40)), 14) == 100.0)
+    # RSI of a strictly falling series -> ~0
+    r_down = rsi(list(range(40, 1, -1)), 14)
+    check("rsi all-down ~ 0", r_down is not None and r_down < 1.0, f"got {r_down}")
+    # trailing return: 100 -> 120 over lookback = +20%
+    check("trailing_return +20%",
+          abs((trailing_return([100]*5 + [100, 110, 120], 2, 0) or 0) - 0.20) < 1e-9)
+    # correlation: identical series -> r = +1
+    from correlation import _pearson
+    check("pearson identical = +1", abs((_pearson([1,2,3,4],[1,2,3,4]) or 0) - 1.0) < 1e-9)
+    check("pearson opposite = -1", abs((_pearson([1,2,3,4],[4,3,2,1]) or 0) + 1.0) < 1e-9)
+
+
+def test_backtest_no_lookahead():
+    print("backtest no-lookahead:")
+    from historical_feed import make_synthetic
+    feed = make_synthetic(["AAA", "BBB"], days=200, seed=3)
+    feed.set_cursor(50)
+    bars = feed.get_daily_bars("AAA")
+    # At cursor 50 the feed must expose exactly 51 bars (0..50) and NOTHING after.
+    check("feed exposes only history up to cursor", bars is not None and len(bars.close) == 51,
+          f"got {len(bars.close) if bars else None}")
+    q = feed.get_quote("AAA")
+    check("quote price = close at cursor", q is not None and q.price == bars.close[-1])
+    # Advancing reveals exactly one more bar (no jumps, no future leakage).
+    feed.advance()
+    check("advance reveals one more bar", len(feed.get_daily_bars("AAA").close) == 52)
+
+
 def main():
-    test_indicators(); test_sizing(); test_broker(); test_live_gate(); test_trade_record_and_mc()
+    test_indicators(); test_sizing(); test_broker(); test_live_gate()
+    test_trade_record_and_mc(); test_new_strategies(); test_backtest_no_lookahead()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
