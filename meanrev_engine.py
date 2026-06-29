@@ -1,0 +1,59 @@
+"""Mean reversion engine (RSI).
+
+Contrarian to the momentum books: buys oversold names (RSI low) that are still
+in a longer-term uptrend, and exits when RSI recovers toward the mean — or on a
+protective ATR stop. Tracked as its own system so its return stream can be
+correlation-checked against the momentum books (that's the whole point).
+"""
+
+from __future__ import annotations
+
+import logging
+
+from config import MEANREV, MIN_DOLLAR_VOL, MIN_PRICE
+from indicators import rsi
+from models import Action, Signal, System
+from risk import position_size
+
+log = logging.getLogger("meanrev")
+
+
+class MeanReversionEngine:
+    def __init__(self, feed, broker, kill, logger):
+        self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
+
+    def _open(self):
+        return sum(1 for p in self._broker.positions.values() if p.system is System.MEANREV)
+
+    def handle_signal(self, signal: Signal):
+        if not self._kill.may_open(System.MEANREV):
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_KILL_SWITCH); return
+        if self._open() >= MEANREV.max_positions or signal.ticker in self._broker.positions:
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK); return
+        q = self._feed.get_quote(signal.ticker)
+        if q is None or q.atr is None:
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK, "no quote/atr"); return
+        if q.price < MIN_PRICE or (q.avg_dollar_volume or 0) < MIN_DOLLAR_VOL:
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_LIQUIDITY); return
+        stop = q.price - MEANREV.atr_stop_multiple * q.atr
+        shares = position_size(self._broker.equity, q.price, stop, getattr(self._broker, "cash", 1e12))
+        if shares <= 0:
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK, "size=0"); return
+        self._broker.buy(signal.ticker, shares, q.price, System.MEANREV, signal.source, stop)
+        self._log.record(signal, System.MEANREV, Action.OPENED,
+                         f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
+
+    def manage_open_positions(self):
+        for ticker in list(self._broker.positions):
+            pos = self._broker.positions[ticker]
+            if pos.system is not System.MEANREV:
+                continue
+            q = self._feed.get_quote(ticker)
+            if q is None:
+                continue
+            self._broker.mark(ticker, q.price)
+            bars = self._feed.get_daily_bars(ticker)
+            r = rsi(bars.close, MEANREV.rsi_period) if bars else None
+            # Exit when reverted to the mean (RSI recovered) OR protective stop hit.
+            if (r is not None and r >= MEANREV.rsi_exit) or q.price <= pos.stop_price:
+                self._log.record_close(System.MEANREV, self._broker.sell(ticker, q.price))
