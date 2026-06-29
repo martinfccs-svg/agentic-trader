@@ -6,6 +6,7 @@ secrets.*
 # --- Runtime artifacts ---
 signal_log.jsonl
 trades.jsonl
+backtest_trades.jsonl
 *.log
 
 # --- Python ---
@@ -22,3 +23,9 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+backtest_signals.jsonl
+
+history/
+
+# backtest outputs / downloaded history
