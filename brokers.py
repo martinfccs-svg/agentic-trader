@@ -48,8 +48,9 @@ class Broker(Protocol):
 # ============================ PAPER ======================================
 
 class PaperBroker:
-    def __init__(self, start_equity: float = START_EQUITY, recorder=None) -> None:
+    def __init__(self, start_equity: float = START_EQUITY, recorder=None, clock=None) -> None:
         self._recorder = recorder
+        self._clock = clock or time.time   # backtest injects the simulated clock
         self.cash = start_equity
         self.start_equity = start_equity
         self.positions: dict[str, Position] = {}
@@ -66,7 +67,7 @@ class PaperBroker:
         fp = self._slip(price, Side.BUY)
         self.cash -= fp * shares + COMMISSION_PER_TRADE
         self.fills.append(Fill(ticker, Side.BUY, shares, fp, COMMISSION_PER_TRADE))
-        pos = Position(ticker, system, shares, fp, time.time(), stop_price,
+        pos = Position(ticker, system, shares, fp, self._clock(), stop_price,
                        source, entry_stop=stop_price, high_water=fp, last_price=fp)
         self.positions[ticker] = pos
         log.info("[PAPER] BUY %s x%.4f @ %.4f stop %.4f [%s]",
@@ -90,7 +91,7 @@ class PaperBroker:
         if self._recorder:
             self._recorder.record(TradeRecord.build(
                 pos.ticker, pos.system.value, pos.source.value if pos.source else "",
-                pos.entry_time, time.time(), pos.entry_price, exit_price,
+                pos.entry_time, self._clock(), pos.entry_price, exit_price,
                 pos.shares, pos.entry_stop, realized))
 
     def mark(self, ticker, price):
