@@ -2,3 +2,6 @@
 finnhub-python>=2.4
 # Execution (real orders). Only needed when BROKER=alpaca.
 alpaca-py>=0.13
+# Notifications
+requests>=2.28
+
