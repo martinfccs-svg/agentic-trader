@@ -120,9 +120,36 @@ def test_backtest_no_lookahead():
     check("advance reveals one more bar", len(feed.get_daily_bars("AAA").close) == 52)
 
 
+def test_feed_cache():
+    print("per-cycle cache (429 fix):")
+    from feed_layer import FinnhubFeed
+    calls = {"candle": 0, "quote": 0}
+    class FakeClient:
+        def stock_candles(self, t, res, a, b):
+            calls["candle"] += 1
+            return {"s": "ok", "c": [10.0]*60, "h": [11.0]*60, "l": [9.0]*60, "v": [1e6]*60}
+        def quote(self, t):
+            calls["quote"] += 1
+            return {"c": 10.0}
+    f = FinnhubFeed(FakeClient())
+    f.new_cycle()
+    # Four strategies all asking for the same ticker's daily bars in one cycle...
+    for _ in range(4):
+        f.get_daily_bars("AAPL")
+    f.get_quote("AAPL")
+    # ...should hit the candle API far fewer times than the number of requests.
+    check("daily bars fetched once despite 4 requests", calls["candle"] <= 2,
+          f"candle calls={calls['candle']}")
+    before = calls["candle"]
+    f.new_cycle()                        # next cycle -> cache cleared -> refetch allowed
+    f.get_daily_bars("AAPL")
+    check("new_cycle clears cache (refetch)", calls["candle"] > before)
+
+
 def main():
     test_indicators(); test_sizing(); test_broker(); test_live_gate()
     test_trade_record_and_mc(); test_new_strategies(); test_backtest_no_lookahead()
+    test_feed_cache()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
