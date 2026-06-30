@@ -27,6 +27,7 @@ from config import (
 )
 from models import Fill, Position, Side, System
 from trade_record import TradeRecord, TradeRecorder
+from notifier import Notifier
 
 log = logging.getLogger("broker")
 
@@ -51,6 +52,7 @@ class PaperBroker:
     def __init__(self, start_equity: float = START_EQUITY, recorder=None, clock=None) -> None:
         self._recorder = recorder
         self._clock = clock or time.time   # backtest injects the simulated clock
+        self._notifier = Notifier()
         self.cash = start_equity
         self.start_equity = start_equity
         self.positions: dict[str, Position] = {}
@@ -70,6 +72,7 @@ class PaperBroker:
         pos = Position(ticker, system, shares, fp, self._clock(), stop_price,
                        source, entry_stop=stop_price, high_water=fp, last_price=fp)
         self.positions[ticker] = pos
+        self._notifier.notify_entry(ticker, shares, fp, system.value, source.value if hasattr(source, 'value') else str(source))
         log.info("[PAPER] BUY %s x%.4f @ %.4f stop %.4f [%s]",
                  ticker, shares, fp, stop_price, system.value)
         return pos
@@ -82,6 +85,7 @@ class PaperBroker:
         self.realized_pnl[pos.system] += realized
         self.realized_today += realized
         self.fills.append(Fill(ticker, Side.SELL, pos.shares, fp, COMMISSION_PER_TRADE))
+        self._notifier.notify_exit(ticker, pos.shares, fp, pos.entry_price, realized, pos.system.value)
         log.info("[PAPER] SELL %s x%.4f @ %.4f -> %.2f [%s]",
                  ticker, pos.shares, fp, realized, pos.system.value)
         self._emit(pos, fp, realized)
@@ -123,6 +127,7 @@ class AlpacaBroker:
 
     def __init__(self, recorder=None) -> None:
         self._recorder = recorder
+        self._notifier = Notifier()
         if not (ALPACA_API_KEY and ALPACA_SECRET_KEY):
             raise RuntimeError("BROKER=alpaca but ALPACA_API_KEY/SECRET not set.")
         try:
@@ -181,6 +186,7 @@ class AlpacaBroker:
         pos = Position(ticker, system, qty, price, time.time(),
                        stop_price, source, entry_stop=stop_price, high_water=price, last_price=price)
         self.positions[ticker] = pos
+        self._notifier.notify_entry(ticker, qty, price, system.value, source.value if hasattr(source, 'value') else str(source))
         return pos
 
     def sell(self, ticker, price):
@@ -190,6 +196,7 @@ class AlpacaBroker:
         realized = (price - pos.entry_price) * pos.shares
         self.realized_pnl[pos.system] += realized
         self.realized_today += realized
+        self._notifier.notify_exit(ticker, pos.shares, price, pos.entry_price, realized, pos.system.value)
         log.warning("[ALPACA] SELL %s submitted -> est %.2f [%s]",
                     ticker, realized, pos.system.value)
         if self._recorder:
@@ -227,3 +234,4 @@ def build_broker(recorder=None):
     if BROKER == "alpaca":
         return AlpacaBroker(recorder=recorder)
     return PaperBroker(recorder=recorder)
+
