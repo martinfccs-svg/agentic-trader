@@ -62,6 +62,7 @@ def build():
 def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, engines,
           n: int = 0, force_market_open=False):
     log.info("=== cycle %d start ===", n)
+    feed.new_cycle()                     # one fetch per ticker this cycle (rate-limit fix)
     kill.check_emergencies()
     is_open = force_market_open or market_is_open()
 
