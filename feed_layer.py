@@ -108,6 +108,18 @@ class FinnhubFeed(_HealthMixin):
         super().__init__()
         self._client = client
         self._limiter = RateLimiter(RATE_LIMIT_CALLS, RATE_LIMIT_WINDOW_SECONDS)
+        self._cache: dict = {}        # per-cycle memo; cleared by new_cycle()
+
+    def new_cycle(self):
+        """Clear the per-cycle cache. Called once at the top of each cycle so
+        the four strategies + quote-builder share ONE fetch per ticker instead
+        of each re-fetching the same candles (the fix for the 429 storms)."""
+        self._cache.clear()
+
+    def _memo(self, key, fn):
+        if key not in self._cache:
+            self._cache[key] = fn()
+        return self._cache[key]
 
     def _call(self, key, *args, **kwargs):
         b = self._breakers[key]
@@ -130,27 +142,33 @@ class FinnhubFeed(_HealthMixin):
         return Bars(ticker, close=raw["c"], high=raw["h"], low=raw["l"], volume=raw["v"])
 
     def get_daily_bars(self, ticker):
-        now = int(time.time())
-        return self._candles(ticker, DAILY_RESOLUTION, now - DAILY_LOOKBACK_DAYS * 86_400, now)
+        def fetch():
+            now = int(time.time())
+            return self._candles(ticker, DAILY_RESOLUTION, now - DAILY_LOOKBACK_DAYS * 86_400, now)
+        return self._memo(("daily", ticker), fetch)
 
     def get_intraday_bars(self, ticker):
-        now = int(time.time())
-        return self._candles(ticker, INTRADAY_RESOLUTION, now - INTRADAY_LOOKBACK_MIN * 60, now)
+        def fetch():
+            now = int(time.time())
+            return self._candles(ticker, INTRADAY_RESOLUTION, now - INTRADAY_LOOKBACK_MIN * 60, now)
+        return self._memo(("intra", ticker), fetch)
 
     def get_quote(self, ticker):
-        raw = self._call("quote", ticker)
-        if not raw or "c" not in raw:
-            return None
-        # Use intraday bars for live ATR/VWAP/relvol; fall back to daily.
-        bars = self.get_intraday_bars(ticker) or self.get_daily_bars(ticker)
-        return Quote(
-            ticker=ticker, price=raw["c"],
-            atr=atr(bars) if bars else None,
-            vwap=vwap(bars) if bars else None,
-            rel_volume=relative_volume(bars) if bars else None,
-            avg_dollar_volume=avg_dollar_volume(bars) if bars else None,
-            sma=sma(bars.close, 10) if bars else None,
-        )
+        def fetch():
+            raw = self._call("quote", ticker)
+            if not raw or "c" not in raw:
+                return None
+            # Cached bars: get_intraday/get_daily reuse the per-cycle memo.
+            bars = self.get_intraday_bars(ticker) or self.get_daily_bars(ticker)
+            return Quote(
+                ticker=ticker, price=raw["c"],
+                atr=atr(bars) if bars else None,
+                vwap=vwap(bars) if bars else None,
+                rel_volume=relative_volume(bars) if bars else None,
+                avg_dollar_volume=avg_dollar_volume(bars) if bars else None,
+                sma=sma(bars.close, 10) if bars else None,
+            )
+        return self._memo(("quote", ticker), fetch)
 
 
 class SimulatedFeed(_HealthMixin):
@@ -180,6 +198,7 @@ class SimulatedFeed(_HealthMixin):
 
     def get_daily_bars(self, ticker): return self._daily.get(ticker)
     def get_intraday_bars(self, ticker): return self._intraday.get(ticker)
+    def new_cycle(self): pass        # local data; nothing to cache/clear
 
     def get_quote(self, ticker):
         bars = self._intraday[ticker]
