@@ -64,7 +64,20 @@ def live_money_armed() -> bool:
 # ============================ ACCOUNT + RISK =============================
 START_EQUITY = _f("START_EQUITY", 50_000)          # paper accounting only
 RISK_PER_TRADE_PCT = _f("RISK_PER_TRADE_PCT", 0.01)
-MAX_POSITION_SIZE = _f("MAX_POSITION_SIZE", 3_000)
+# Position cap: percentage of CURRENT equity, so it scales and never goes stale.
+# (The old flat $3,000 was sized for a $50k account; at $100k it silently became
+# 2x tighter and was binding on every trade, overriding risk-based sizing.)
+MAX_POSITION_PCT = _f("MAX_POSITION_PCT", 0.10)     # 10% of equity per position
+# Legacy override: if MAX_POSITION_SIZE is set explicitly in env, it still wins.
+MAX_POSITION_SIZE = _f("MAX_POSITION_SIZE", 0)      # 0 = use MAX_POSITION_PCT
+
+
+def max_position_dollars(equity: float) -> float:
+    """The dollar cap for one position. Env MAX_POSITION_SIZE (if >0) wins;
+    otherwise a percentage of current equity."""
+    if MAX_POSITION_SIZE > 0:
+        return MAX_POSITION_SIZE
+    return equity * MAX_POSITION_PCT
 DAILY_LOSS_LIMIT = _f("DAILY_LOSS_LIMIT", 2_500)
 
 MIN_PRICE = _f("MIN_PRICE", 5)
@@ -99,7 +112,7 @@ class SwingParams:
 
 @dataclass(frozen=True)
 class IntradayParams:
-    atr_stop_multiple: float = _f("INTRADAY_ATR_MULT", 1.0)
+    atr_stop_multiple: float = _f("INTRADAY_ATR_MULT", 2.5)  # was 1.0: stops were 0.1-0.2% of price -> churn
     max_positions: int = _i("INTRADAY_MAX_POS", 4)
     min_rel_volume: float = _f("VOL_SPIKE_MULT", 1.3)
     opening_range_min: int = _i("OPENING_RANGE_MIN", 15)
