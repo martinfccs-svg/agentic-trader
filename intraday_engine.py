@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
+from indicators import avg_dollar_volume
 from models import Action, Signal, System
 from risk import position_size
 
@@ -34,7 +35,12 @@ class IntradayRiskEngine:
         if q is None or q.atr is None:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "no quote/atr")
             return
-        if q.price < MIN_PRICE or (q.avg_dollar_volume or 0) < MIN_DOLLAR_VOL:
+        # Liquidity on DAILY dollar volume. q.avg_dollar_volume is computed from
+        # 1-min bars here, so comparing it to a daily threshold was ~390x too
+        # strict (the unit bug that was rejecting PLTR). Test daily bars instead.
+        daily = self._feed.get_daily_bars(signal.ticker)
+        daily_dv = avg_dollar_volume(daily) if daily else None
+        if q.price < MIN_PRICE or (daily_dv or 0) < MIN_DOLLAR_VOL:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_LIQUIDITY)
             return
         stop = q.price - INTRADAY.atr_stop_multiple * q.atr
