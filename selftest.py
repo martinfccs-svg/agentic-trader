@@ -42,8 +42,11 @@ def test_indicators():
 
 def test_sizing():
     print("sizing:")
+    # equity 50k, 1% risk = $500; entry 100 stop 95 -> wants 100 shares.
+    # Cap = 10% of equity = $5,000 -> 50 shares binds. (Old test expected 30
+    # from the stale flat $3,000 cap -- that WAS the bug.)
     s = position_size(50_000, 100, 95, 1e9)
-    check("risk-based capped by max notional", abs(s - 30.0) < 1e-9, f"got {s}")
+    check("risk-based capped by scaled max notional", abs(s - 50.0) < 1e-9, f"got {s}")
     check("zero when stop>=entry", position_size(50_000, 100, 105, 1e9) == 0.0)
 
 
@@ -146,10 +149,25 @@ def test_feed_cache():
     check("new_cycle clears cache (refetch)", calls["candle"] > before)
 
 
+def test_tightness_fixes():
+    print("tightness fixes:")
+    from config import max_position_dollars, INTRADAY
+    # Fix 1: cap scales with equity (10% default) instead of stale flat $3000.
+    check("cap scales with equity (100k -> 10k)", max_position_dollars(100_000) == 10_000.0)
+    check("cap scales with equity (50k -> 5k)", max_position_dollars(50_000) == 5_000.0)
+    s = position_size(equity=100_000, entry=390, stop=389, cash=1e9)
+    check("sizing uses scaled cap (~25.6 sh at 100k)", abs(s - (10_000/390)) < 0.01, f"got {s}")
+    # Fix 2: intraday ATR multiple widened (stops were 0.1-0.2% of price -> churn).
+    check("intraday ATR mult widened to 2.5", INTRADAY.atr_stop_multiple == 2.5)
+    # Fix 3: intraday liquidity test reads DAILY bars (unit fix, was ~390x too strict).
+    src = open("intraday_engine.py").read()
+    check("intraday liquidity uses daily bars", "get_daily_bars" in src and "daily_dv" in src)
+
+
 def main():
     test_indicators(); test_sizing(); test_broker(); test_live_gate()
     test_trade_record_and_mc(); test_new_strategies(); test_backtest_no_lookahead()
-    test_feed_cache()
+    test_feed_cache(); test_tightness_fixes()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
