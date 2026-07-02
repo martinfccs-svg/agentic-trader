@@ -7,7 +7,7 @@ This replaces v4.1's flat $3,000 sizing with risk-based sizing.
 
 from __future__ import annotations
 
-from config import MAX_POSITION_SIZE, RISK_PER_TRADE_PCT
+from config import RISK_PER_TRADE_PCT, max_position_dollars
 
 
 def position_size(equity: float, entry: float, stop: float, cash: float) -> float:
@@ -17,5 +17,5 @@ def position_size(equity: float, entry: float, stop: float, cash: float) -> floa
     dollar_risk = equity * RISK_PER_TRADE_PCT
     shares = dollar_risk / risk_per_share
     # cap by max position notional and by cash on hand
-    shares = min(shares, MAX_POSITION_SIZE / entry, cash / entry)
+    shares = min(shares, max_position_dollars(equity) / entry, cash / entry)
     return max(shares, 0.0)
