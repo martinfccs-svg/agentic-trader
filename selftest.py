@@ -143,10 +143,14 @@ def test_feed_cache():
     # ...should hit the candle API far fewer times than the number of requests.
     check("daily bars fetched once despite 4 requests", calls["candle"] <= 2,
           f"candle calls={calls['candle']}")
-    before = calls["candle"]
-    f.new_cycle()                        # next cycle -> cache cleared -> refetch allowed
-    f.get_daily_bars("AAPL")
-    check("new_cycle clears cache (refetch)", calls["candle"] > before)
+    # Daily bars now live in a slow-TTL cache (see test_universe_expansion);
+    # the per-cycle memo still governs QUOTES, which must refetch each cycle.
+    f.get_quote("AAPL"); q1 = calls["quote"]
+    f.get_quote("AAPL")                  # same cycle -> memoized, no new call
+    check("quote memoized within a cycle", calls["quote"] == q1)
+    f.new_cycle()
+    f.get_quote("AAPL")                  # new cycle -> per-cycle memo cleared
+    check("new_cycle clears quote memo (refetch)", calls["quote"] > q1)
 
 
 def test_tightness_fixes():
@@ -178,10 +182,52 @@ def test_coherence_fixes():
           f"got {XSECT.rebalance_cycles}")
 
 
+def test_universe_expansion():
+    print("universe expansion + tiered caching:")
+    from config import (DAILY_BARS_REFRESH_CYCLES, INTRADAY_UNIVERSE,
+                        RATE_LIMIT_CALLS, UNIVERSE)
+    check("universe widened (>=30 names)", len(UNIVERSE) >= 30, f"got {len(UNIVERSE)}")
+    check("multi-sector (JPM+XOM+UNH+CAT present)",
+          all(t in UNIVERSE for t in ("JPM", "XOM", "UNH", "CAT")))
+    check("intraday subset is a subset", set(INTRADAY_UNIVERSE) <= set(UNIVERSE))
+    check("intraday subset is small (<=15)", len(INTRADAY_UNIVERSE) <= 15)
+
+    # Daily TTL cache: new_cycle must NOT refetch daily bars until TTL expires.
+    from feed_layer import FinnhubFeed
+    calls = {"candle": 0}
+    class FakeClient:
+        def stock_candles(self, t, res, a, b):
+            calls["candle"] += 1
+            return {"s": "ok", "c": [10.0]*60, "h": [11.0]*60, "l": [9.0]*60, "v": [1e6]*60}
+        def quote(self, t): return {"c": 10.0}
+    f = FinnhubFeed(FakeClient())
+    f.new_cycle(); f.get_daily_bars("AAPL")
+    n1 = calls["candle"]
+    for _ in range(5):                       # five more cycles inside the TTL
+        f.new_cycle(); f.get_daily_bars("AAPL")
+    check("daily bars NOT refetched within TTL", calls["candle"] == n1,
+          f"calls went {n1} -> {calls['candle']}")
+    for _ in range(DAILY_BARS_REFRESH_CYCLES):
+        f.new_cycle()
+    f.get_daily_bars("AAPL")
+    check("daily bars refetched after TTL", calls["candle"] > n1)
+
+    # Rate budget: worst-case steady-state calls/min must fit under the limiter.
+    # intraday subset: quote + 1-min candle per cycle; daily: full universe
+    # amortized over the TTL window. 2 cycles/min at 30s cycles.
+    cycles_per_min = 2
+    intraday_per_min = len(INTRADAY_UNIVERSE) * 2 * cycles_per_min
+    daily_per_min = len(UNIVERSE) * (cycles_per_min / DAILY_BARS_REFRESH_CYCLES)
+    est = intraday_per_min + daily_per_min
+    check(f"rate budget fits (est {est:.0f}/min < {RATE_LIMIT_CALLS})",
+          est < RATE_LIMIT_CALLS * 0.8, f"estimate {est:.0f}")
+
+
 def main():
     test_indicators(); test_sizing(); test_broker(); test_live_gate()
     test_trade_record_and_mc(); test_new_strategies(); test_backtest_no_lookahead()
     test_feed_cache(); test_tightness_fixes(); test_coherence_fixes()
+    test_universe_expansion()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
