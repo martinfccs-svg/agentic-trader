@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from config import DAILY_LOSS_LIMIT, ENDPOINTS, SYSTEM_REQUIRED_FEEDS
+from config import ENDPOINTS, SYSTEM_REQUIRED_FEEDS, daily_loss_dollars
 from models import FeedCriticality, System
 
 log = logging.getLogger("kill_switch")
@@ -27,7 +27,7 @@ class KillSwitch:
                 if ENDPOINTS[k].criticality is crit and not self._feed.health(k).is_available]
 
     def may_open(self, system):
-        if self._broker.realized_today <= -abs(DAILY_LOSS_LIMIT):
+        if self._broker.realized_today <= -abs(daily_loss_dollars(self._broker.equity)):
             log.error("%s: daily loss limit hit (%.2f) -> halting entries.",
                       system.value, self._broker.realized_today)
             return False
