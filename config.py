@@ -208,7 +208,19 @@ UNIVERSE = os.environ.get(
     # energy
     "XOM,CVX,COP,"
     # industrials
-    "CAT,BA,GE,UPS",
+    "CAT,BA,GE,UPS,"
+    # defense
+    "LMT,RTX,NOC,GD,LHX,HII,TDG,HWM,"
+    # utilities
+    "NEE,DUK,SO,"
+    # consumer staples
+    "PG,KO,PEP,"
+    # materials (incl. gold)
+    "LIN,FCX,NEM,"
+    # REITs
+    "PLD,AMT,"
+    # logistics / transports
+    "FDX,UNP",
 ).split(",")
 
 # Intraday scans a LIQUID SUBSET every cycle (1-min data is the expensive,
