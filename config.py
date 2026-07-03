@@ -78,7 +78,17 @@ def max_position_dollars(equity: float) -> float:
     if MAX_POSITION_SIZE > 0:
         return MAX_POSITION_SIZE
     return equity * MAX_POSITION_PCT
-DAILY_LOSS_LIMIT = _f("DAILY_LOSS_LIMIT", 2_500)
+# Daily loss halt: percentage of CURRENT equity (flat dollars go stale as the
+# cap did). Legacy override: set DAILY_LOSS_LIMIT explicitly and it wins.
+DAILY_LOSS_PCT = _f("DAILY_LOSS_PCT", 0.025)        # 2.5% of equity
+DAILY_LOSS_LIMIT = _f("DAILY_LOSS_LIMIT", 0)        # 0 = use DAILY_LOSS_PCT
+
+
+def daily_loss_dollars(equity: float) -> float:
+    """Dollar halt threshold. Env DAILY_LOSS_LIMIT (if >0) wins; else % of equity."""
+    if DAILY_LOSS_LIMIT > 0:
+        return DAILY_LOSS_LIMIT
+    return equity * DAILY_LOSS_PCT
 
 MIN_PRICE = _f("MIN_PRICE", 5)
 MIN_DOLLAR_VOL = _f("MIN_DOLLAR_VOL", 5_000_000)
@@ -117,7 +127,7 @@ class IntradayParams:
     min_rel_volume: float = _f("VOL_SPIKE_MULT", 1.3)
     opening_range_min: int = _i("OPENING_RANGE_MIN", 15)
     require_above_vwap: bool = _b("INTRADAY_REQUIRE_VWAP", True)
-    trail_pct: float = TRAIL_PCT
+    trail_pct: float = _f("INTRADAY_TRAIL_PCT", 0.01)  # was 6% (15x wider than the stop -> never engaged); 1% matches intraday scale
 
 
 SWING = SwingParams()
@@ -138,7 +148,7 @@ class XSectParams:
     lookback_days: int = _i("XS_LOOKBACK", 126)          # ~6 months
     skip_days: int = _i("XS_SKIP", 5)                    # skip most-recent week
     top_n: int = _i("XS_TOP_N", 3)                       # hold top N of universe
-    rebalance_cycles: int = _i("XS_REBAL_CYCLES", 50)    # rebalance cadence (cycles)
+    rebalance_cycles: int = _i("XS_REBAL_CYCLES", 780)   # ~daily at 30s cycles (was 50 = ~25min; 6-month-lookback ranking should not churn intraday)
     atr_stop_multiple: float = _f("XS_ATR_MULT", 3.0)    # wide protective stop
 
 
