@@ -220,7 +220,9 @@ UNIVERSE = os.environ.get(
     # REITs
     "PLD,AMT,"
     # logistics / transports
-    "FDX,UNP",
+    "FDX,UNP,"
+    # emerging tech: AI infrastructure, quantum, drones
+    "SMCI,ARM,MU,IONQ,AVAV,KTOS",
 ).split(",")
 
 # Intraday scans a LIQUID SUBSET every cycle (1-min data is the expensive,
