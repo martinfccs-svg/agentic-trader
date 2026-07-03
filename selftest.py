@@ -164,10 +164,24 @@ def test_tightness_fixes():
     check("intraday liquidity uses daily bars", "get_daily_bars" in src and "daily_dv" in src)
 
 
+def test_coherence_fixes():
+    print("coherence fixes:")
+    from config import daily_loss_dollars, INTRADAY, XSECT
+    # Fix A: daily loss halt scales with equity (2.5% default), env override wins.
+    check("daily loss scales (100k -> 2500)", daily_loss_dollars(100_000) == 2_500.0)
+    check("daily loss scales (50k -> 1250)", daily_loss_dollars(50_000) == 1_250.0)
+    # Fix B: intraday trail on the stop's scale (1%), not 6%.
+    check("intraday trail = 1%", abs(INTRADAY.trail_pct - 0.01) < 1e-12,
+          f"got {INTRADAY.trail_pct}")
+    # Fix C: cross-sectional rebalance ~daily, not every ~25 minutes.
+    check("xsect rebalance ~daily (780 cycles)", XSECT.rebalance_cycles == 780,
+          f"got {XSECT.rebalance_cycles}")
+
+
 def main():
     test_indicators(); test_sizing(); test_broker(); test_live_gate()
     test_trade_record_and_mc(); test_new_strategies(); test_backtest_no_lookahead()
-    test_feed_cache(); test_tightness_fixes()
+    test_feed_cache(); test_tightness_fixes(); test_coherence_fixes()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
