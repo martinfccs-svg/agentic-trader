@@ -187,7 +187,38 @@ SOURCE_TO_SYSTEM: dict[SignalSource, System] = {
     SignalSource.REL_STRENGTH:   System.XSECTMOM,
 }
 
+# ---------------------------------------------------------------------------
+# Universe: ~36 liquid large-caps across 8 sectors. The old 16-name list was
+# almost all mega-cap tech -- one correlated pond, which undermined strategy
+# diversification and made the cross-sectional top-3 ranking nearly meaningless.
+# Override with env UNIVERSE / INTRADAY_UNIVERSE (comma-separated).
+# ---------------------------------------------------------------------------
 UNIVERSE = os.environ.get(
     "UNIVERSE",
-    "AAPL,MSFT,NVDA,AMD,TSLA,META,AMZN,GOOGL,F,T,HNRG,TPL,IX,KARD,INTC,PLTR",
+    # tech / semis
+    "AAPL,MSFT,NVDA,AMD,AVGO,CRM,INTC,PLTR,"
+    # consumer / retail
+    "AMZN,TSLA,WMT,COST,HD,MCD,NKE,DIS,"
+    # communication / media
+    "GOOGL,META,NFLX,T,"
+    # financials
+    "JPM,BAC,GS,V,MA,"
+    # healthcare
+    "UNH,JNJ,LLY,PFE,"
+    # energy
+    "XOM,CVX,COP,"
+    # industrials
+    "CAT,BA,GE,UPS",
 ).split(",")
+
+# Intraday scans a LIQUID SUBSET every cycle (1-min data is the expensive,
+# per-cycle cost); daily strategies scan the FULL universe on a slow refresh.
+INTRADAY_UNIVERSE = os.environ.get(
+    "INTRADAY_UNIVERSE",
+    "AAPL,MSFT,NVDA,AMD,AMZN,TSLA,META,GOOGL,NFLX,AVGO,PLTR,JPM",
+).split(",")
+
+# Daily bars don't change during the session: refresh them every N cycles
+# instead of every cycle (30 cycles ~= 15 min at 30s cycles). This is what
+# keeps the wider universe inside the Finnhub rate budget.
+DAILY_BARS_REFRESH_CYCLES = _i("DAILY_BARS_REFRESH_CYCLES", 30)
