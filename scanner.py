@@ -33,9 +33,10 @@ log = logging.getLogger("scanner")
 
 
 class PriceActionScanner:
-    def __init__(self, feed, universe: list[str]) -> None:
+    def __init__(self, feed, universe: list[str], intraday_universe: list[str] | None = None) -> None:
         self._feed = feed
-        self._universe = universe
+        self._universe = universe                                # daily strategies: full breadth
+        self._intraday_universe = intraday_universe or universe  # per-cycle cost: liquid subset
 
     # ----- swing: daily breakout + trend -----
     def scan_swing(self) -> list[Signal]:
@@ -61,7 +62,7 @@ class PriceActionScanner:
     # ----- intraday: opening-range / momentum breakout -----
     def scan_intraday(self) -> list[Signal]:
         out: list[Signal] = []
-        for t in self._universe:
+        for t in self._intraday_universe:
             bars = self._feed.get_intraday_bars(t)
             if bars is None or len(bars.close) < INTRADAY.opening_range_min + 1:
                 continue
