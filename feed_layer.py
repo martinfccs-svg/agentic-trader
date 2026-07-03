@@ -108,12 +108,18 @@ class FinnhubFeed(_HealthMixin):
         super().__init__()
         self._client = client
         self._limiter = RateLimiter(RATE_LIMIT_CALLS, RATE_LIMIT_WINDOW_SECONDS)
-        self._cache: dict = {}        # per-cycle memo; cleared by new_cycle()
+        self._cache: dict = {}        # per-cycle memo (quotes, intraday bars)
+        self._daily_cache: dict = {}  # ticker -> (cycle_stamp, Bars); slow TTL
+        self._cycle_n = 0
 
     def new_cycle(self):
-        """Clear the per-cycle cache. Called once at the top of each cycle so
-        the four strategies + quote-builder share ONE fetch per ticker instead
-        of each re-fetching the same candles (the fix for the 429 storms)."""
+        """Advance the cycle clock and clear the per-cycle memo. Daily bars are
+        NOT cleared here -- they refresh on a slow TTL (DAILY_BARS_REFRESH_CYCLES)
+        because daily candles don't change during the session. This tiering is
+        what lets a ~36-name universe fit inside the Finnhub rate budget:
+        intraday cost is per-cycle for a liquid subset; daily cost amortizes to
+        a couple of calls per minute across the whole universe."""
+        self._cycle_n += 1
         self._cache.clear()
 
     def _memo(self, key, fn):
@@ -142,10 +148,18 @@ class FinnhubFeed(_HealthMixin):
         return Bars(ticker, close=raw["c"], high=raw["h"], low=raw["l"], volume=raw["v"])
 
     def get_daily_bars(self, ticker):
-        def fetch():
-            now = int(time.time())
-            return self._candles(ticker, DAILY_RESOLUTION, now - DAILY_LOOKBACK_DAYS * 86_400, now)
-        return self._memo(("daily", ticker), fetch)
+        # Slow-TTL cache: daily candles don't change intraday.
+        from config import DAILY_BARS_REFRESH_CYCLES
+        hit = self._daily_cache.get(ticker)
+        if hit is not None and (self._cycle_n - hit[0]) < DAILY_BARS_REFRESH_CYCLES:
+            return hit[1]
+        now = int(time.time())
+        bars = self._candles(ticker, DAILY_RESOLUTION, now - DAILY_LOOKBACK_DAYS * 86_400, now)
+        if bars is not None:
+            self._daily_cache[ticker] = (self._cycle_n, bars)
+            return bars
+        # Fetch failed (breaker open / transient): serve stale rather than nothing.
+        return hit[1] if hit is not None else None
 
     def get_intraday_bars(self, ticker):
         def fetch():
