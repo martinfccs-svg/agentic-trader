@@ -68,7 +68,10 @@ def run_backtest(feed: HistoricalFeed, out_path: str = "backtest_trades.jsonl"):
         broker.reset_daily()                 # daily-loss limit is per simulated day
         for sig in scanner.scan_swing() + scanner.scan_meanrev():
             router.route(sig)
-        xsect.maybe_rebalance()
+        # One backtest cycle = one DAY, so the live cycle-based cadence (tuned
+        # for 30s cycles) doesn't apply here. Rebalance weekly in day units.
+        if days % 5 == 0:
+            xsect.rebalance()
         for e in engines:
             e.manage_open_positions()
         feed.advance()
