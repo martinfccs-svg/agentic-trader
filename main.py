@@ -19,7 +19,7 @@ import argparse
 import logging
 import time
 
-from config import SCAN_INTERVAL_SECS, TRADING_MODE, UNIVERSE, live_money_armed
+from config import INTRADAY_UNIVERSE, SCAN_INTERVAL_SECS, TRADING_MODE, UNIVERSE, live_money_armed
 from brokers import build_broker
 from feed_layer import SimulatedFeed, build_feed
 from intraday_engine import IntradayRiskEngine
@@ -54,7 +54,7 @@ def build():
         System.SWING: swing, System.INTRADAY: intraday,
         System.MEANREV: meanrev, System.XSECTMOM: xsect,
     })
-    scanner = PriceActionScanner(feed, UNIVERSE)
+    scanner = PriceActionScanner(feed, UNIVERSE, INTRADAY_UNIVERSE)
     engines = [swing, intraday, meanrev, xsect]
     return feed, broker, logger, kill, swing, intraday, meanrev, xsect, router, scanner, engines
 
