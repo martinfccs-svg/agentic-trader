@@ -223,11 +223,43 @@ def test_universe_expansion():
           est < RATE_LIMIT_CALLS * 0.8, f"estimate {est:.0f}")
 
 
+def test_market_calendar():
+    print("market calendar (holiday bug fix):")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from safety import early_closes, market_holidays, market_is_open, near_close
+    ET = ZoneInfo("America/New_York")
+    # THE live-discovered case: Fri Jul 3 2026 (Jul 4 observed) must be CLOSED.
+    check("Jul 3 2026 observed holiday -> closed",
+          market_is_open(datetime(2026, 7, 3, 11, 0, tzinfo=ET)) is False)
+    # Normal trading day at 11am -> open.
+    check("normal Tue 11am -> open",
+          market_is_open(datetime(2026, 7, 7, 11, 0, tzinfo=ET)) is True)
+    # Fixed + rule-based holidays.
+    from datetime import date
+    h26 = market_holidays(2026)
+    check("Thanksgiving 2026 = Nov 26", date(2026, 11, 26) in h26)
+    check("MLK 2026 = Jan 19", date(2026, 1, 19) in h26)
+    check("Good Friday 2026 = Apr 3", date(2026, 4, 3) in h26)
+    check("Christmas 2026 (Fri) in set", date(2026, 12, 25) in h26)
+    # Early close: day after Thanksgiving 2026 = Nov 27; open at 11, CLOSED at 14.
+    check("Nov 27 2026 is early close", date(2026, 11, 27) in early_closes(2026))
+    check("half-day: open at 11am",
+          market_is_open(datetime(2026, 11, 27, 11, 0, tzinfo=ET)) is True)
+    check("half-day: CLOSED at 2pm (13:00 close)",
+          market_is_open(datetime(2026, 11, 27, 14, 0, tzinfo=ET)) is False)
+    # Flatten window keys off the EARLY close on a half-day (12:45 within 15min of 13:00).
+    check("half-day flatten fires before 13:00 (12:57, 5-min window)",
+          near_close(datetime(2026, 11, 27, 12, 57, tzinfo=ET)) is True)
+    check("normal day 12:50 NOT near close",
+          near_close(datetime(2026, 7, 7, 12, 50, tzinfo=ET)) is False)
+
+
 def main():
     test_indicators(); test_sizing(); test_broker(); test_live_gate()
     test_trade_record_and_mc(); test_new_strategies(); test_backtest_no_lookahead()
     test_feed_cache(); test_tightness_fixes(); test_coherence_fixes()
-    test_universe_expansion()
+    test_universe_expansion(); test_market_calendar()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
