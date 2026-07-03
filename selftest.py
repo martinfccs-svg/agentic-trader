@@ -186,9 +186,9 @@ def test_universe_expansion():
     print("universe expansion + tiered caching:")
     from config import (DAILY_BARS_REFRESH_CYCLES, INTRADAY_UNIVERSE,
                         RATE_LIMIT_CALLS, UNIVERSE)
-    check("universe widened (>=30 names)", len(UNIVERSE) >= 30, f"got {len(UNIVERSE)}")
-    check("multi-sector (JPM+XOM+UNH+CAT present)",
-          all(t in UNIVERSE for t in ("JPM", "XOM", "UNH", "CAT")))
+    check("universe widened (>=57 names)", len(UNIVERSE) >= 57, f"got {len(UNIVERSE)}")
+    check("13 sectors incl. defense/utilities/staples/materials/REIT/logistics",
+          all(t in UNIVERSE for t in ("JPM","XOM","UNH","CAT","LMT","NEE","PG","LIN","NEM","PLD","UNP")))
     check("intraday subset is a subset", set(INTRADAY_UNIVERSE) <= set(UNIVERSE))
     check("intraday subset is small (<=15)", len(INTRADAY_UNIVERSE) <= 15)
 
