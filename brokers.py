@@ -12,8 +12,10 @@ separate broker, not in the feed layer.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Optional, Protocol
 
 from config import (
@@ -115,6 +117,23 @@ class PaperBroker:
 
 # ============================ ALPACA (real) ==============================
 
+# Alpaca error codes observed in the 2026-07-06 incident
+_POSITION_NOT_FOUND = 40410000   # 404: position not found
+_INSUFFICIENT_QTY = 40310000     # 403: qty held for open (bracket) orders
+
+
+def _alpaca_error_code(err) -> Optional[int]:
+    """Extract Alpaca's numeric error code from an APIError, defensively."""
+    code = getattr(err, "code", None)
+    if isinstance(code, int):
+        return code
+    msg = str(err)
+    for known in (_POSITION_NOT_FOUND, _INSUFFICIENT_QTY):
+        if str(known) in msg:
+            return known
+    return None
+
+
 class AlpacaBroker:
     """Real order execution via Alpaca. VERIFY against alpaca-py before trusting:
     field names and SDK signatures can change. Live money requires
@@ -134,6 +153,12 @@ class AlpacaBroker:
         self.positions: dict[str, Position] = {}
         self.realized_pnl: dict[System, float] = {s: 0.0 for s in System}
         self.realized_today = 0.0
+        # trade_logger.print_scorecard reads broker.start_equity; its absence
+        # crashed the shutdown path on 2026-07-06 (AttributeError).
+        try:
+            self.start_equity = float(self._client.get_account().equity)
+        except Exception:  # noqa: BLE001
+            self.start_equity = START_EQUITY
         mode = "LIVE-MONEY" if live_money_armed() else "alpaca-paper"
         log.warning("AlpacaBroker initialised in %s mode", mode)
 
@@ -146,6 +171,7 @@ class AlpacaBroker:
 
     def buy(self, ticker, shares, price, system, source, stop_price):
         self._guard_live()
+        from alpaca.common.exceptions import APIError
         from alpaca.trading.requests import (
             LimitOrderRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest,
         )
@@ -155,6 +181,29 @@ class AlpacaBroker:
         qty = round(shares)
         if qty <= 0:
             return None
+
+        # --- Duplicate guard #1: never buy what the broker already holds. ---
+        # After a crash-restart the local tracker is empty while Alpaca still
+        # holds shares; on 2026-07-06 this tripled TSLA (3 x 24 = 72 shares).
+        try:
+            existing = self._client.get_open_position(ticker)
+            if existing is not None and float(existing.qty) > 0:
+                log.error("[ALPACA] REFUSING BUY %s: broker already holds %s "
+                          "shares not in local tracker (restart desync). Run "
+                          "reconcile_at_startup().", ticker, existing.qty)
+                return None
+        except APIError as e:
+            if _alpaca_error_code(e) != _POSITION_NOT_FOUND:
+                log.warning("[ALPACA] pre-buy position check %s: %s", ticker, e)
+            # 404 = no existing position: safe to proceed.
+
+        # --- Duplicate guard #2: deterministic client_order_id. -------------
+        # Same (system, ticker, minute) after a restart hashes to the same id,
+        # so Alpaca rejects the re-fired order instead of filling it again.
+        minute = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        coid = (f"bot-{system.value}-"
+                + hashlib.sha256(f"{system.value}:{ticker}:{minute}".encode())
+                .hexdigest()[:16])
 
         if USE_BRACKET_ORDERS:
             # Marketable LIMIT entry: cap the worst fill we'll accept (slippage guard).
@@ -169,24 +218,104 @@ class AlpacaBroker:
                 order_class=OrderClass.BRACKET,
                 stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
                 take_profit=TakeProfitRequest(limit_price=target),
+                client_order_id=coid,
             )
-            log.warning("[ALPACA] BRACKET BUY %s x%d limit<=%.2f stop=%.2f target=%.2f [%s]",
-                        ticker, qty, limit, stop_price, target, system.value)
+            log.warning("[ALPACA] BRACKET BUY %s x%d limit<=%.2f stop=%.2f target=%.2f [%s] coid=%s",
+                        ticker, qty, limit, stop_price, target, system.value, coid)
         else:
             order = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY,
-                                       time_in_force=TimeInForce.DAY)
-            log.warning("[ALPACA] MARKET BUY %s x%d [%s]", ticker, qty, system.value)
+                                       time_in_force=TimeInForce.DAY,
+                                       client_order_id=coid)
+            log.warning("[ALPACA] MARKET BUY %s x%d [%s] coid=%s",
+                        ticker, qty, system.value, coid)
 
-        self._client.submit_order(order)
+        try:
+            self._client.submit_order(order)
+        except APIError as e:
+            if "client_order_id" in str(e).lower() or "duplicate" in str(e).lower():
+                log.warning("[ALPACA] duplicate order suppressed for %s "
+                            "(coid=%s) — original from before restart still "
+                            "stands", ticker, coid)
+                return None
+            raise
         pos = Position(ticker, system, qty, price, time.time(),
                        stop_price, source, entry_stop=stop_price, high_water=price, last_price=price)
         self.positions[ticker] = pos
         return pos
 
+    def _cancel_open_orders(self, ticker) -> None:
+        """Cancel all open orders for a ticker. Bracket stop/target legs hold
+        the shares (held_for_orders), which made close_position 403 on
+        2026-07-06 (GOOGL 27/27 held, TSLA 72/72 held). Cancel first."""
+        from alpaca.common.exceptions import APIError
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+        try:
+            open_orders = self._client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker]))
+        except APIError as e:
+            log.warning("[ALPACA] could not list open orders for %s: %s", ticker, e)
+            return
+        for order in open_orders:
+            try:
+                self._client.cancel_order_by_id(order.id)
+                log.info("[ALPACA] canceled order %s for %s (releasing hold)",
+                         order.id, ticker)
+            except APIError as e:
+                log.warning("[ALPACA] cancel %s for %s: %s", order.id, ticker, e)
+
+    def _await_qty_release(self, ticker, timeout: float = 5.0) -> str:
+        """Poll until held qty is released. Returns 'ready', 'flat', or 'timeout'."""
+        from alpaca.common.exceptions import APIError
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                p = self._client.get_open_position(ticker)
+                if float(getattr(p, "qty_available", 0) or 0) > 0:
+                    return "ready"
+            except APIError as e:
+                if _alpaca_error_code(e) == _POSITION_NOT_FOUND:
+                    return "flat"   # canceling legs revealed nothing left
+                log.warning("[ALPACA] poll %s: %s", ticker, e)
+            time.sleep(0.25)
+        return "timeout"
+
     def sell(self, ticker, price):
+        """Close a position. Order of operations matters:
+          1. cancel bracket legs  2. wait for hold release  3. close
+          4. pop local position ONLY after broker confirms flat.
+        The old version popped first, so a failed close erased local state
+        while shares stayed at the broker — the core desync of 2026-07-06.
+        A 404 from Alpaca means already flat (a bracket leg filled) and is
+        treated as success. Genuine failures re-raise WITHOUT popping, so
+        callers can retry next cycle."""
         self._guard_live()
-        pos = self.positions.pop(ticker)
-        self._client.close_position(ticker)
+        from alpaca.common.exceptions import APIError
+
+        pos = self.positions.get(ticker)
+        if pos is None:
+            log.warning("[ALPACA] sell %s: not in local tracker, skipping", ticker)
+            return 0.0
+
+        self._cancel_open_orders(ticker)
+        state = self._await_qty_release(ticker)
+
+        if state != "flat":
+            try:
+                self._client.close_position(ticker)
+            except APIError as e:
+                if _alpaca_error_code(e) == _POSITION_NOT_FOUND:
+                    log.info("[ALPACA] %s already flat at broker "
+                             "(bracket leg filled)", ticker)
+                else:
+                    # Keep the local position so flatten/manage retries later.
+                    log.error("[ALPACA] close %s FAILED (position kept for "
+                              "retry): %s", ticker, e)
+                    raise
+        else:
+            log.info("[ALPACA] %s already flat at broker after leg cancel", ticker)
+
+        self.positions.pop(ticker, None)
         realized = (price - pos.entry_price) * pos.shares
         self.realized_pnl[pos.system] += realized
         self.realized_today += realized
@@ -198,6 +327,71 @@ class AlpacaBroker:
                 pos.entry_time, time.time(), pos.entry_price, price,
                 pos.shares, pos.entry_stop, realized))
         return realized
+
+    def reconcile_at_startup(self) -> list[str]:
+        """Rebuild self.positions from the broker (source of truth at boot).
+
+        After each 2026-07-06 crash the bot restarted with an empty tracker
+        while Alpaca still held shares + live bracket legs, so it re-bought
+        and later 404'd. This must run BEFORE the first cycle.
+
+        Returns the list of ORPHAN tickers: broker holdings whose origin
+        can't be matched to a bot order today. If non-empty, the caller
+        must HALT — unknown holdings are unknown risk; do not liquidate
+        silently, a human should look.
+        """
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        orphans: list[str] = []
+        broker_positions = self._client.get_all_positions()
+        if not broker_positions:
+            log.info("[ALPACA] reconcile: broker flat, nothing to adopt")
+            return orphans
+
+        # Map ticker -> System via our coid prefix on today's parent orders
+        # (bracket child legs get auto-generated ids, so scan ALL statuses).
+        sys_by_ticker: dict[str, System] = {}
+        stop_by_ticker: dict[str, float] = {}
+        try:
+            todays = self._client.get_orders(GetOrdersRequest(
+                status=QueryOrderStatus.ALL, limit=500, nested=True))
+        except Exception as e:  # noqa: BLE001
+            log.error("[ALPACA] reconcile: cannot list orders: %s", e)
+            todays = []
+        for o in todays:
+            coid = getattr(o, "client_order_id", "") or ""
+            if coid.startswith("bot-"):
+                parts = coid.split("-")
+                if len(parts) >= 3:
+                    system = next((s for s in System if s.value == parts[1]), None)
+                    if system:
+                        sys_by_ticker[o.symbol] = system
+            sp = getattr(o, "stop_price", None)
+            status = str(getattr(o, "status", "")).lower()
+            if sp and ("new" in status or "held" in status or "accepted" in status):
+                stop_by_ticker[o.symbol] = float(sp)
+
+        for p in broker_positions:
+            ticker = p.symbol
+            system = sys_by_ticker.get(ticker)
+            if system is None:
+                orphans.append(ticker)
+                log.critical("[ALPACA] reconcile: ORPHAN %s x%s — no bot "
+                             "order found; resolve manually before trading",
+                             ticker, p.qty)
+                continue
+            entry = float(p.avg_entry_price)
+            qty = float(p.qty)
+            last = float(getattr(p, "current_price", None) or entry)
+            stop = stop_by_ticker.get(ticker, round(entry * 0.99, 2))
+            self.positions[ticker] = Position(
+                ticker, system, qty, entry, time.time(), stop, None,
+                entry_stop=stop, high_water=max(entry, last), last_price=last)
+            log.warning("[ALPACA] reconcile: re-adopted %s x%s [%s] "
+                        "entry=%.2f stop=%.2f", ticker, qty, system.value,
+                        entry, stop)
+        return orphans
 
     def mark(self, ticker, price):
         pos = self.positions.get(ticker)
