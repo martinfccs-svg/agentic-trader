@@ -102,14 +102,54 @@ def run(loop: bool, cycles: int = 40):
     log.info("agentic-trader v6 | mode=%s | broker live-armed=%s",
              TRADING_MODE, live_money_armed())
 
+    # Broker is the source of truth at boot. After each 2026-07-06 crash the
+    # bot restarted with an empty tracker while Alpaca still held shares and
+    # live bracket legs -> re-bought TSLA (72 shares) and 404'd on manage.
+    # Re-adopt bot-created positions; HALT on anything unrecognized.
+    if hasattr(broker, "reconcile_at_startup"):
+        try:
+            orphans = broker.reconcile_at_startup()
+        except Exception as e:  # noqa: BLE001
+            log.critical("startup reconciliation failed (%s) — HALTING; "
+                         "cannot trade without knowing broker state", e)
+            return
+        if orphans:
+            log.critical("ORPHAN positions at broker: %s — HALTING. Resolve "
+                         "in the Alpaca dashboard, then restart.", orphans)
+            return
+
     sim = isinstance(feed, SimulatedFeed)
     i = 0
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 10
     try:
         if loop:
             while True:
                 i += 1
-                cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, engines,
-                      n=i, force_market_open=sim)
+                # Contain per-cycle failures. On 2026-07-06 a single Alpaca
+                # 404 propagated up, killed the process, and the deployment
+                # restart loop (3 restarts in 13 min) caused duplicate orders
+                # and Finnhub 429s. A bad cycle should log, back off, and let
+                # the next cycle retry — not take the process down.
+                try:
+                    cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, engines,
+                          n=i, force_market_open=sim)
+                    consecutive_failures = 0
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    consecutive_failures += 1
+                    backoff = min(2 ** consecutive_failures, 60)
+                    log.error("cycle %d failed (%d consecutive): %s — "
+                              "backing off %ds", i, consecutive_failures, e,
+                              backoff, exc_info=True)
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        log.critical("%d consecutive cycle failures — "
+                                     "something is structurally broken; "
+                                     "exiting to shutdown flatten",
+                                     consecutive_failures)
+                        break
+                    time.sleep(backoff)
                 if sim:
                     feed.step_prices()
                 time.sleep(SCAN_INTERVAL_SECS)
@@ -122,8 +162,18 @@ def run(loop: bool, cycles: int = 40):
     except KeyboardInterrupt:
         log.warning("interrupt -> flattening intraday before exit")
     finally:
-        intraday.flatten_all("shutdown")     # never leave intraday hanging
-        logger.print_scorecard(broker)
+        # Crash #3 (2026-07-06) died INSIDE this block: flatten raised on a
+        # held bracket, and separately print_scorecard raised AttributeError.
+        # Shutdown must complete no matter what either step does.
+        try:
+            intraday.flatten_all("shutdown")     # never leave intraday hanging
+        except Exception as e:  # noqa: BLE001
+            log.critical("shutdown flatten raised (positions may remain at "
+                         "broker — check the Alpaca dashboard): %s", e)
+        try:
+            logger.print_scorecard(broker)
+        except Exception as e:  # noqa: BLE001
+            log.error("scorecard failed during shutdown: %s", e)
 
 
 if __name__ == "__main__":
