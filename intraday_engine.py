@@ -20,6 +20,11 @@ log = logging.getLogger("intraday")
 class IntradayRiskEngine:
     def __init__(self, feed, broker, kill, logger):
         self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
+        # One-shot latch: on 2026-07-06 the feed-breaker path re-flattened
+        # every ~5s for 15+ minutes, spamming logs and burning API budget
+        # (contributing to the Finnhub 429s). Latched after a clean flatten;
+        # re-armed when a new position opens.
+        self._flattened_latch = False
 
     def _open(self):
         return sum(1 for p in self._broker.positions.values() if p.system is System.INTRADAY)
@@ -48,7 +53,15 @@ class IntradayRiskEngine:
         if shares <= 0:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "size=0")
             return
-        self._broker.buy(signal.ticker, shares, q.price, System.INTRADAY, signal.source, stop)
+        pos = self._broker.buy(signal.ticker, shares, q.price, System.INTRADAY,
+                               signal.source, stop)
+        if pos is None:
+            # Broker refused: duplicate order suppressed, existing broker-side
+            # position, or qty rounded to 0. Not an open — do not record one.
+            self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
+                             "broker refused order (duplicate/existing/qty=0)")
+            return
+        self._flattened_latch = False   # new position -> flatten may act again
         self._log.record(signal, System.INTRADAY, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
@@ -63,12 +76,53 @@ class IntradayRiskEngine:
             self._broker.mark(ticker, q.price)
             pos.stop_price = max(pos.stop_price, pos.high_water * (1 - INTRADAY.trail_pct))
             if q.price <= pos.stop_price:
-                self._log.record_close(System.INTRADAY, self._broker.sell(ticker, q.price))
+                # Crash #2 (2026-07-06) started here: a 404 from Alpaca killed
+                # the whole cycle. sell() now handles 404 as already-flat; any
+                # genuine failure is contained and retried next cycle.
+                try:
+                    self._log.record_close(System.INTRADAY,
+                                           self._broker.sell(ticker, q.price))
+                except Exception as e:  # noqa: BLE001
+                    log.error("stop-exit %s failed (will retry next cycle): %s",
+                              ticker, e)
 
     def flatten_all(self, reason: str):
-        for ticker in list(self._broker.positions):
-            if self._broker.positions[ticker].system is System.INTRADAY:
-                q = self._feed.get_quote(ticker)
-                price = q.price if q else self._broker.positions[ticker].entry_price
-                self._log.record_close(System.INTRADAY, self._broker.sell(ticker, price))
-        log.info("INTRADAY flatten complete (%s)", reason)
+        """Close every intraday position. Guarantees (post-2026-07-06):
+          - every ticker is attempted even if an earlier one fails
+            (old code: one 404 aborted the loop AND the process, and
+            record_close never ran — which is why the daily report showed
+            0 trades while the account moved)
+          - failures keep their position in the tracker and retry next cycle
+          - runs at most once while flat (no 5-second flatten spam)
+        """
+        tickers = [t for t, p in self._broker.positions.items()
+                   if p.system is System.INTRADAY]
+        if not tickers:
+            if not self._flattened_latch:
+                log.info("INTRADAY flatten: nothing open (%s)", reason)
+                self._flattened_latch = True
+            return
+
+        failed = []
+        for ticker in tickers:
+            q = self._feed.get_quote(ticker)
+            pos = self._broker.positions.get(ticker)
+            if pos is None:      # closed elsewhere while iterating
+                continue
+            price = q.price if q else pos.entry_price
+            try:
+                self._log.record_close(System.INTRADAY,
+                                       self._broker.sell(ticker, price))
+            except Exception as e:  # noqa: BLE001
+                log.error("flatten %s failed (%s): %s", ticker, reason, e)
+                failed.append(ticker)
+
+        if failed:
+            # Do NOT latch and do NOT claim success — positions remain in the
+            # tracker for retry. The old unconditional "flatten complete" log
+            # masked exactly this state.
+            log.error("INTRADAY flatten INCOMPLETE (%s): failed=%s — "
+                      "will retry next cycle", reason, failed)
+        else:
+            self._flattened_latch = True
+            log.info("INTRADAY flatten complete (%s)", reason)
