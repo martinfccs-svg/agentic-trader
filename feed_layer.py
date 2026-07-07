@@ -4,6 +4,13 @@ Provides separate DAILY bars (for the swing scanner) and INTRADAY 1-min bars
 (for the intraday scanner), real quotes, plus the rate limiter / circuit breaker
 / health surface. SimulatedFeed remains so the system runs and is testable with
 no key (local dev / CI). Finnhub is data only — execution lives in brokers.py.
+
+v6.1: the health surface now exposes is_down(key) with breaker-based
+semantics (OPEN, or at/over the consecutive-failure threshold). Consumers —
+the kill switch in particular — must use this instead of judging health by
+success recency: the quote endpoint is only exercised on the entry/manage
+path, so "no recent success" is the NORMAL state of a flat book, not an
+outage. Recency-as-health deadlocked all entries on 2026-07-07.
 """
 
 from __future__ import annotations
@@ -101,6 +108,22 @@ class _HealthMixin:
 
     def health(self, key): return self._breakers[key].health
     def all_health(self): return {k: b.health for k, b in self._breakers.items()}
+
+    def is_down(self, key) -> bool:
+        """True iff the endpoint is ACTIVELY FAILING: breaker OPEN, or at/over
+        the consecutive-failure threshold (covers the window between the
+        first failures and the breaker formally opening).
+
+        Deliberately NOT based on last_success_at recency. An endpoint that
+        has not been called recently is healthy until proven otherwise —
+        every real failure is recorded the moment it happens, so there is no
+        detection gap, and recency-as-health deadlocks any endpoint that is
+        only exercised conditionally (quote is only called on entry/manage,
+        so a flat book made it look 'stale' and vetoed all entries on
+        2026-07-07)."""
+        h = self._breakers[key].health
+        return (h.state is HealthState.OPEN
+                or h.consecutive_failures >= BREAKER_FAILURE_THRESHOLD)
 
 
 class FinnhubFeed(_HealthMixin):
