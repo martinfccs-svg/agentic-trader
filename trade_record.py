@@ -9,13 +9,29 @@ The key normalized field is `r_multiple`: realized P&L expressed in units of the
 risk you originally took (entry-to-initial-stop). +3R = made three times the
 planned risk; -1R = lost the full planned risk. R-multiples make trades of
 different sizes and prices comparable, which is exactly what Monte Carlo needs.
+
+Persistence (post 2026-07-07): Railway's container filesystem is ephemeral and
+deployment logs are purged on redeploy — a trades.jsonl written to the working
+directory dies with every deploy, taking the Monte Carlo history with it. The
+path now defaults to the persistent volume and is configurable:
+
+    TRADES_LOG_PATH   default /data/trades.jsonl  (mount a volume at /data)
+
+If the volume isn't mounted, we fall back to ./trades.jsonl and log an ERROR —
+degraded but never silent. Write failures are also logged loudly: the old
+`except OSError: pass` silently discarded trade records.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
-from typing import Optional
+import logging
+import os
+from dataclasses import asdict, dataclass, fields
+
+log = logging.getLogger("trade_record")
+
+TRADES_LOG_PATH = os.getenv("TRADES_LOG_PATH", "/data/trades.jsonl")
 
 
 @dataclass
@@ -47,29 +63,69 @@ class TradeRecord:
         )
 
 
+_FIELD_NAMES = {f.name for f in fields(TradeRecord)}
+
+
+def _resolve_path(preferred: str) -> str:
+    """Ensure the trades file is writable; fall back loudly if not."""
+    try:
+        d = os.path.dirname(preferred) or "."
+        os.makedirs(d, exist_ok=True)
+        with open(preferred, "a", encoding="utf-8"):
+            pass
+        return preferred
+    except OSError as e:
+        fallback = "./trades.jsonl"
+        log.error("trade_record: %s not writable (%s) — falling back to %s. "
+                  "Mount a Railway volume at /data or set TRADES_LOG_PATH, or "
+                  "the Monte Carlo trade history will NOT survive redeploys.",
+                  preferred, e, fallback)
+        return fallback
+
+
 class TradeRecorder:
     """Appends TradeRecords to a JSONL file as trades close. One line per trade.
     This file is the bridge: the bot writes it live; Monte Carlo reads it."""
 
-    def __init__(self, path: str = "trades.jsonl") -> None:
-        self._path = path
+    def __init__(self, path: str | None = None) -> None:
+        self._path = _resolve_path(path or TRADES_LOG_PATH)
+        log.info("trade_record: writing closed trades to %s", self._path)
 
     def record(self, tr: TradeRecord) -> None:
+        """Append one closed trade. Never raises (a recording failure must not
+        break trading) but failures are LOUD — silent loss corrupted the
+        history before."""
+        line = json.dumps(asdict(tr))
         try:
-            with open(self._path, "a") as fh:
-                fh.write(json.dumps(asdict(tr)) + "\n")
-        except OSError:
-            pass
+            with open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as e:
+            log.error("trade_record: WRITE FAILED (%s) — lost record: %s",
+                      e, line)
 
     @staticmethod
-    def load(path: str = "trades.jsonl") -> list[TradeRecord]:
+    def load(path: str | None = None) -> list[TradeRecord]:
+        """Read the trade history. Skips corrupt lines with a warning instead
+        of aborting the whole load, and ignores unknown fields so records
+        written by a future schema still load here."""
+        path = path or TRADES_LOG_PATH
         out: list[TradeRecord] = []
         try:
-            with open(path) as fh:
-                for line in fh:
+            with open(path, encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
                     line = line.strip()
-                    if line:
-                        out.append(TradeRecord(**json.loads(line)))
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                        out.append(TradeRecord(
+                            **{k: v for k, v in raw.items()
+                               if k in _FIELD_NAMES}))
+                    except (json.JSONDecodeError, TypeError) as e:
+                        log.warning("trade_record: skipping corrupt line %d "
+                                    "in %s: %s", lineno, path, e)
         except FileNotFoundError:
             pass
         return out
