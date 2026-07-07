@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+import audit
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import avg_dollar_volume
 from models import Action, Signal, System
@@ -123,6 +124,9 @@ class IntradayRiskEngine:
             # masked exactly this state.
             log.error("INTRADAY flatten INCOMPLETE (%s): failed=%s — "
                       "will retry next cycle", reason, failed)
+            audit.flatten(reason=reason, closed=len(tickers) - len(failed),
+                          failed=failed)
         else:
             self._flattened_latch = True
             log.info("INTRADAY flatten complete (%s)", reason)
+            audit.flatten(reason=reason, closed=len(tickers), failed=[])
