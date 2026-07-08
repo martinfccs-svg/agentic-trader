@@ -177,6 +177,20 @@ def run(loop: bool, cycles: int = 40):
             audit.halt(reason=f"positions held by benched system: {benched_held}")
             return
 
+    # Verify the feed returns enough daily history for each enabled
+    # strategy's lookback (200-SMA, 126d momentum...). A short fetch window
+    # makes a strategy silently signal-less forever — loud beats silent.
+    if not sim:
+        try:
+            from scan_health import check_bar_depth
+            starved = check_bar_depth(feed, UNIVERSE, ENABLED_SYSTEMS)
+            if starved:
+                log.critical("strategies %s are data-starved — running "
+                             "anyway (no bad trades possible, just none), "
+                             "but fix the fetch window.", starved)
+        except Exception as e:  # noqa: BLE001
+            log.warning("bar-depth check failed (non-fatal): %s", e)
+
     i = 0
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 10
