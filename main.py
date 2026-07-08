@@ -45,6 +45,20 @@ log = logging.getLogger("main")
 # hours) — pure API burn. Slow the cadence when the market is closed.
 AFTER_HOURS_INTERVAL_SECS = int(os.getenv("AFTER_HOURS_INTERVAL_SECS", "60"))
 
+# ---------------------------------------------------------------------------
+# STRATEGY PROFILE (2026-07-08 operator decision)
+# Focus: swing + xsectmom, meanrev at reduced weight. Intraday is BENCHED —
+# code stays, engine isn't built, its scanner never runs, its 1-min data cost
+# disappears. Benched, not deleted: a positive backtest + feed redundancy is
+# the documented path back (see benchmark strategy shelf, rev 9).
+# Override per-deploy without a code change: ENABLED_SYSTEMS=swing,xsectmom
+# ---------------------------------------------------------------------------
+ENABLED_SYSTEMS = {
+    s.strip().lower()
+    for s in os.getenv("ENABLED_SYSTEMS", "swing,xsectmom,meanrev").split(",")
+    if s.strip()
+}
+
 
 def build():
     feed = build_feed(UNIVERSE)
@@ -52,17 +66,33 @@ def build():
     broker = build_broker(recorder=recorder)
     logger = TradeLogger()
     kill = KillSwitch(feed, broker)
-    swing = SwingRiskEngine(feed, broker, kill, logger)
-    intraday = IntradayRiskEngine(feed, broker, kill, logger)
-    meanrev = MeanReversionEngine(feed, broker, kill, logger)
-    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, UNIVERSE)
-    kill.register_price_loss_handler(System.INTRADAY, intraday.flatten_all)
-    router = SignalRouter({
-        System.SWING: swing, System.INTRADAY: intraday,
-        System.MEANREV: meanrev, System.XSECTMOM: xsect,
-    })
+
+    swing = SwingRiskEngine(feed, broker, kill, logger) \
+        if "swing" in ENABLED_SYSTEMS else None
+    intraday = IntradayRiskEngine(feed, broker, kill, logger) \
+        if "intraday" in ENABLED_SYSTEMS else None
+    meanrev = MeanReversionEngine(feed, broker, kill, logger) \
+        if "meanrev" in ENABLED_SYSTEMS else None
+    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, UNIVERSE) \
+        if "xsectmom" in ENABLED_SYSTEMS else None
+
+    if intraday is not None:
+        # Only the intraday book flattens on price loss; others hold their
+        # broker-side stops through an outage.
+        kill.register_price_loss_handler(System.INTRADAY, intraday.flatten_all)
+
+    routes = {}
+    if swing:    routes[System.SWING] = swing
+    if intraday: routes[System.INTRADAY] = intraday
+    if meanrev:  routes[System.MEANREV] = meanrev
+    if xsect:    routes[System.XSECTMOM] = xsect
+    router = SignalRouter(routes)
+
     scanner = PriceActionScanner(feed, UNIVERSE, INTRADAY_UNIVERSE)
-    engines = [swing, intraday, meanrev, xsect]
+    engines = [e for e in (swing, intraday, meanrev, xsect) if e is not None]
+    log.warning("strategy profile: enabled=%s | benched=%s",
+                sorted(ENABLED_SYSTEMS),
+                sorted({s.value for s in System} - ENABLED_SYSTEMS))
     return feed, broker, logger, kill, swing, intraday, meanrev, xsect, router, scanner, engines
 
 
@@ -73,25 +103,27 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     kill.check_emergencies()
     is_open = force_market_open or market_is_open()
 
-    # Scan each strategy. Swing/mean-reversion run on daily structure; intraday
-    # only while open and outside the flatten window.
-    swing_sigs = scanner.scan_swing()
-    meanrev_sigs = scanner.scan_meanrev()
-    intraday_sigs = scanner.scan_intraday() if (is_open and not near_close()) else []
+    # Scan only the enabled strategies. Skipping scan_intraday() is what
+    # removes the 12-name 1-minute data cost while intraday is benched.
+    swing_sigs = scanner.scan_swing() if swing else []
+    meanrev_sigs = scanner.scan_meanrev() if meanrev else []
+    intraday_sigs = scanner.scan_intraday() \
+        if (intraday and is_open and not near_close()) else []
     log.info("scan: %d trend, %d meanrev, %d intraday (market_open=%s)",
              len(swing_sigs), len(meanrev_sigs), len(intraday_sigs), is_open)
     for sig in swing_sigs + meanrev_sigs + intraday_sigs:
         router.route(sig)
 
     # Cross-sectional momentum rebalances on its own cadence (not per signal).
-    xsect.maybe_rebalance()
+    if xsect:
+        xsect.maybe_rebalance()
 
     # Manage every book each cycle (even when entries are halted).
     for e in engines:
         e.manage_open_positions()
 
-    # Hard EOD flatten for the intraday book only.
-    if is_open and near_close():
+    # Hard EOD flatten applies to the intraday book only.
+    if intraday and is_open and near_close():
         intraday.flatten_all("near close")
 
     # Honest P&L: realized and unrealized logged separately, per system.
@@ -127,11 +159,22 @@ def run(loop: bool, cycles: int = 40):
                          "cannot trade without knowing broker state", e)
             audit.halt(reason=f"reconciliation failed: {e}")
             return
-        audit.reconcile(adopted=sorted(broker.positions), orphans=orphans)
+        audit.reconcile(adopted=sorted(broker.positions), orphans=orphans,
+                        profile=sorted(ENABLED_SYSTEMS))
         if orphans:
             log.critical("ORPHAN positions at broker: %s — HALTING. Resolve "
                          "in the Alpaca dashboard, then restart.", orphans)
             audit.halt(reason=f"orphan positions at broker: {orphans}")
+            return
+        # A position belonging to a BENCHED system has no engine to manage
+        # its stops/exits. Refuse to run rather than babysit it blind.
+        benched_held = sorted({t for t, p in broker.positions.items()
+                               if p.system.value not in ENABLED_SYSTEMS})
+        if benched_held:
+            log.critical("positions %s belong to benched system(s) — HALTING. "
+                         "Close them manually or re-enable the system via "
+                         "ENABLED_SYSTEMS, then restart.", benched_held)
+            audit.halt(reason=f"positions held by benched system: {benched_held}")
             return
 
     i = 0
@@ -188,7 +231,8 @@ def run(loop: bool, cycles: int = 40):
         # held bracket, and separately print_scorecard raised AttributeError.
         # Shutdown must complete no matter what either step does.
         try:
-            intraday.flatten_all("shutdown")     # never leave intraday hanging
+            if intraday is not None:
+                intraday.flatten_all("shutdown")   # never leave intraday hanging
         except Exception as e:  # noqa: BLE001
             log.critical("shutdown flatten raised (positions may remain at "
                          "broker — check the Alpaca dashboard): %s", e)
