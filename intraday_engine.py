@@ -67,6 +67,15 @@ class IntradayRiskEngine:
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
     def manage_open_positions(self):
+        # First, book any positions whose bracket legs filled broker-side.
+        # 2026-07-08: AMZN/NVDA legs filled and the phantoms lingered 8+ min,
+        # blocking re-entry and inflating unrealized. Now they're closed in
+        # the books at the leg's actual fill price on the next cycle.
+        if hasattr(self._broker, "reconcile_filled_legs"):
+            for _ticker, realized in \
+                    self._broker.reconcile_filled_legs(System.INTRADAY).items():
+                self._log.record_close(System.INTRADAY, realized)
+
         for ticker in list(self._broker.positions):
             pos = self._broker.positions[ticker]
             if pos.system is not System.INTRADAY:
