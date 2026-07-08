@@ -283,6 +283,103 @@ class AlpacaBroker:
             time.sleep(0.25)
         return "timeout"
 
+    def _await_fill_price(self, order_id, timeout: float = 3.0):
+        """Poll an order briefly for its actual filled_avg_price. Market
+        closes usually fill sub-second; if not filled in time, return None
+        and the caller falls back to the quote estimate."""
+        from alpaca.common.exceptions import APIError
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                o = self._client.get_order_by_id(order_id)
+                if str(getattr(o, "status", "")).lower().endswith("filled") \
+                        and getattr(o, "filled_avg_price", None):
+                    return float(o.filled_avg_price)
+            except APIError as e:
+                log.warning("[ALPACA] poll order %s: %s", order_id, e)
+                return None
+            time.sleep(0.3)
+        return None
+
+    def _find_closing_fill_price(self, ticker):
+        """Find the actual fill price of the most recent filled SELL order
+        for a ticker — i.e. the bracket leg that closed the position
+        broker-side. Returns None if not found."""
+        from alpaca.trading.enums import OrderSide, QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+        try:
+            orders = self._client.get_orders(GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED, symbols=[ticker],
+                side=OrderSide.SELL, limit=20))
+        except Exception as e:  # noqa: BLE001
+            log.warning("[ALPACA] closed-order lookup %s: %s", ticker, e)
+            return None
+        best = None
+        for o in orders:
+            if not str(getattr(o, "status", "")).lower().endswith("filled"):
+                continue
+            fap = getattr(o, "filled_avg_price", None)
+            fat = getattr(o, "filled_at", None)
+            if fap and (best is None or (fat and best[0] and fat > best[0])):
+                best = (fat, float(fap))
+        return best[1] if best else None
+
+    def reconcile_filled_legs(self, system=None) -> dict[str, float]:
+        """Close out locally-tracked positions the broker no longer holds —
+        a bracket leg (stop or target) filled broker-side while the local
+        tracker still carried the position.
+
+        Observed 2026-07-08: AMZN/NVDA legs filled, phantoms persisted 8+
+        minutes (blocking re-entry, inflating unrealized) and were finally
+        recorded at the flatten-time QUOTE instead of the leg's real fill.
+        This books them promptly, at the ACTUAL fill price when findable.
+
+        Returns {ticker: realized} so the calling engine can feed its own
+        trade logger. Never raises.
+        """
+        out: dict[str, float] = {}
+        candidates = [t for t, p in self.positions.items()
+                      if system is None or p.system is system]
+        if not candidates:
+            return out
+        try:
+            broker_syms = {p.symbol for p in self._client.get_all_positions()}
+        except Exception as e:  # noqa: BLE001
+            log.warning("[ALPACA] reconcile_filled_legs: cannot list broker "
+                        "positions: %s", e)
+            return out
+        for ticker in candidates:
+            if ticker in broker_syms:
+                continue
+            pos = self.positions.get(ticker)
+            if pos is None:
+                continue
+            fill = self._find_closing_fill_price(ticker)
+            if fill is None:
+                fill = pos.last_price or pos.entry_price
+                log.warning("[ALPACA] RECONCILE %s: leg fill not found — "
+                            "booking at last mark %.2f (estimate)",
+                            ticker, fill)
+            self.positions.pop(ticker, None)
+            realized = (fill - pos.entry_price) * pos.shares
+            self.realized_pnl[pos.system] += realized
+            self.realized_today += realized
+            log.warning("[ALPACA] RECONCILED %s: bracket leg filled "
+                        "broker-side @ %.2f -> %+.2f [%s]",
+                        ticker, fill, realized, pos.system.value)
+            audit.close(ticker=ticker, qty=pos.shares, price=round(fill, 2),
+                        entry=round(pos.entry_price, 2),
+                        realized=round(realized, 2), system=pos.system.value,
+                        via="bracket_leg")
+            if self._recorder:
+                self._recorder.record(TradeRecord.build(
+                    pos.ticker, pos.system.value,
+                    pos.source.value if pos.source else "",
+                    pos.entry_time, time.time(), pos.entry_price, fill,
+                    pos.shares, pos.entry_stop, realized))
+            out[ticker] = realized
+        return out
+
     def sell(self, ticker, price):
         """Close a position. Order of operations matters:
           1. cancel bracket legs  2. wait for hold release  3. close
@@ -303,9 +400,10 @@ class AlpacaBroker:
         self._cancel_open_orders(ticker)
         state = self._await_qty_release(ticker)
 
+        close_order = None
         if state != "flat":
             try:
-                self._client.close_position(ticker)
+                close_order = self._client.close_position(ticker)
             except APIError as e:
                 if _alpaca_error_code(e) == _POSITION_NOT_FOUND:
                     log.info("[ALPACA] %s already flat at broker "
@@ -318,19 +416,31 @@ class AlpacaBroker:
         else:
             log.info("[ALPACA] %s already flat at broker after leg cancel", ticker)
 
+        # Prefer the ACTUAL fill price over the quote estimate. If our close
+        # order filled, poll it; if the position was already flat, the real
+        # exit was a bracket leg — look up its fill. Fall back to the quote.
+        fill = None
+        if close_order is not None:
+            fill = self._await_fill_price(close_order.id)
+        else:
+            fill = self._find_closing_fill_price(ticker)
+        exit_price = fill if fill is not None else price
+        price_src = "fill" if fill is not None else "quote-est"
+
         self.positions.pop(ticker, None)
-        realized = (price - pos.entry_price) * pos.shares
+        realized = (exit_price - pos.entry_price) * pos.shares
         self.realized_pnl[pos.system] += realized
         self.realized_today += realized
-        log.warning("[ALPACA] SELL %s submitted -> est %.2f [%s]",
-                    ticker, realized, pos.system.value)
-        audit.close(ticker=ticker, qty=pos.shares, price=round(price, 2),
+        log.warning("[ALPACA] SELL %s exit=%.4f (%s) -> %+.2f [%s]",
+                    ticker, exit_price, price_src, realized, pos.system.value)
+        audit.close(ticker=ticker, qty=pos.shares, price=round(exit_price, 2),
                     entry=round(pos.entry_price, 2),
-                    realized=round(realized, 2), system=pos.system.value)
+                    realized=round(realized, 2), system=pos.system.value,
+                    via=price_src)
         if self._recorder:
             self._recorder.record(TradeRecord.build(
                 pos.ticker, pos.system.value, pos.source.value if pos.source else "",
-                pos.entry_time, time.time(), pos.entry_price, price,
+                pos.entry_time, time.time(), pos.entry_price, exit_price,
                 pos.shares, pos.entry_stop, realized))
         return realized
 
