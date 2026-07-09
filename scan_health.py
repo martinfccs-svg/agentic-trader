@@ -154,22 +154,63 @@ class DailyRebalanceGate:
     """True exactly once per US trading date, at/after a wall-clock ET time.
     Replaces cycle-count cadence, which broke when cycle speed changed.
 
+    2026-07-09 incident fix: gate state now PERSISTS to disk. The original
+    kept _last_run_date in memory, so every redeploy re-armed it — three
+    mid-session deploys fired three same-day rebalances, and the third ran
+    on breaker-degraded data and dumped INTC/MU (-$99 realized). State
+    lives on the /data volume (REBALANCE_GATE_STATE to change) and survives
+    restarts; a corrupt/missing file degrades to the old in-memory behavior.
+
     Usage in xsection.py:
         self._gate = DailyRebalanceGate()          # in __init__
         def maybe_rebalance(self):
             if not self._gate.should_run():
                 return
             ...existing rebalance logic...
-    Caller remains responsible for market_is_open() if it wants that gate
-    too (recommended: rebalance only on days the market actually trades).
+    Callers that decide NOT to act after the gate fires (market closed,
+    degraded data, kill switch) must call rearm() so it can retry later.
     """
 
-    def __init__(self, at_et: str | None = None) -> None:
+    def __init__(self, at_et: str | None = None,
+                 state_path: str | None = None) -> None:
         raw = at_et or os.getenv("XSECT_REBALANCE_ET", "10:00")
         hh, mm = raw.split(":")
         self._hour, self._minute = int(hh), int(mm)
-        self._last_run_date = None
+        self._state_path = state_path or os.getenv(
+            "REBALANCE_GATE_STATE", "/data/rebalance_gate_state.txt")
+        self._last_run_date = self._load_state()
         self._logged_wait_date = None
+        if self._last_run_date is not None:
+            log.info("rebalance gate: restored state — last ran %s",
+                     self._last_run_date)
+
+    def _load_state(self):
+        try:
+            with open(self._state_path, encoding="utf-8") as fh:
+                s = fh.read().strip()
+            return datetime.strptime(s, "%Y-%m-%d").date() if s else None
+        except (OSError, ValueError):
+            return None
+
+    def _save_state(self) -> None:
+        try:
+            d = os.path.dirname(self._state_path) or "."
+            os.makedirs(d, exist_ok=True)
+            with open(self._state_path, "w", encoding="utf-8") as fh:
+                fh.write(str(self._last_run_date) if self._last_run_date
+                         else "")
+        except OSError as e:
+            log.warning("rebalance gate: cannot persist state to %s (%s) — "
+                        "a redeploy may re-fire the gate today",
+                        self._state_path, e)
+
+    def rearm(self) -> None:
+        """Allow the gate to fire again today. Call when the rebalance was
+        skipped after the gate opened (market closed, degraded data, kill
+        switch) so it retries once conditions recover."""
+        self._last_run_date = None
+        self._save_state()
+        log.info("rebalance gate: re-armed (will retry today)")
 
     def should_run(self, now: datetime | None = None) -> bool:
         now_et = (now or datetime.now(tz=ET)).astimezone(ET)
@@ -185,6 +226,7 @@ class DailyRebalanceGate:
                          self._hour, self._minute)
             return False
         self._last_run_date = today
+        self._save_state()
         log.warning("rebalance gate: OPEN for %s (>= %02d:%02d ET) — "
                     "running today's rebalance", today, self._hour,
                     self._minute)
