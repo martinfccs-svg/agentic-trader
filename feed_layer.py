@@ -16,6 +16,7 @@ outage. Recency-as-health deadlocked all entries on 2026-07-07.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -38,6 +39,27 @@ log = logging.getLogger("feed")
 
 BREAKER_FAILURE_THRESHOLD = 3
 BREAKER_COOLDOWN_SECONDS = 300
+
+# ---------------------------------------------------------------------------
+# Daily lookback floor (2026-07-09 data-starvation fix).
+# The deepest enabled lookback is meanrev's 200-day SMA: ~210 TRADING bars,
+# which needs ~305 CALENDAR days (trading days are ~69% of calendar days).
+# xsectmom needs ~132 trading bars (126 lookback + skip). DAILY_LOOKBACK_DAYS
+# in config was shorter than this, so those strategies could never compute
+# their indicators and silently produced zero signals forever.
+# The floor guarantees a sufficient window even if the config value regresses;
+# a LARGER config value is honored. 500 calendar days ~= 345 trading bars.
+# Cost note: Finnhub daily candles are ONE request per ticker regardless of
+# window width — this changes rows returned, not the rate budget.
+# ---------------------------------------------------------------------------
+_MIN_DAILY_CALENDAR_DAYS = int(os.getenv("MIN_DAILY_LOOKBACK_CALENDAR_DAYS", "500"))
+EFFECTIVE_DAILY_LOOKBACK_DAYS = max(DAILY_LOOKBACK_DAYS, _MIN_DAILY_CALENDAR_DAYS)
+if EFFECTIVE_DAILY_LOOKBACK_DAYS != DAILY_LOOKBACK_DAYS:
+    log.warning("daily lookback raised: config DAILY_LOOKBACK_DAYS=%d is below "
+                "the %d-calendar-day floor needed for the 200-SMA / 126d "
+                "momentum lookbacks — using %d. (Set config to >=%d to "
+                "silence this.)", DAILY_LOOKBACK_DAYS, _MIN_DAILY_CALENDAR_DAYS,
+                EFFECTIVE_DAILY_LOOKBACK_DAYS, _MIN_DAILY_CALENDAR_DAYS)
 
 
 class RateLimiter:
@@ -177,8 +199,12 @@ class FinnhubFeed(_HealthMixin):
         if hit is not None and (self._cycle_n - hit[0]) < DAILY_BARS_REFRESH_CYCLES:
             return hit[1]
         now = int(time.time())
-        bars = self._candles(ticker, DAILY_RESOLUTION, now - DAILY_LOOKBACK_DAYS * 86_400, now)
+        bars = self._candles(ticker, DAILY_RESOLUTION,
+                             now - EFFECTIVE_DAILY_LOOKBACK_DAYS * 86_400, now)
         if bars is not None:
+            if hit is None:      # first successful fetch for this ticker
+                log.info("daily bars %s: %d bars over %d calendar days",
+                         ticker, len(bars.close), EFFECTIVE_DAILY_LOOKBACK_DAYS)
             self._daily_cache[ticker] = (self._cycle_n, bars)
             return bars
         # Fetch failed (breaker open / transient): serve stale rather than nothing.
