@@ -10,6 +10,14 @@ Two scans over the universe:
 The scanner only *flags* candidates. The engines apply liquidity, sizing, stop,
 and the final confirmation before anything is bought. Each signal carries a
 `reason` string so the funnel is auditable.
+
+2026-07-09: ScanFunnel wired through every scan. Each pass now emits a
+rate-limited attrition line, e.g.
+    funnel[swing]: universe=63 bars_ok=61 breakout=3 uptrend=2 vol_confirm=0 -> signals=0
+so "zero signals" is diagnosable at a glance: healthy selectivity shows
+attrition through the gates; data starvation dies at bars_ok. The combined
+boolean checks became sequential continues so each gate is countable — the
+truth table is unchanged.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from indicators import (
     vwap,
 )
 from models import Bars, Signal, SignalSource
+from scan_health import ScanFunnel
 
 log = logging.getLogger("scanner")
 
@@ -37,10 +46,13 @@ class PriceActionScanner:
         self._feed = feed
         self._universe = universe                                # daily strategies: full breadth
         self._intraday_universe = intraday_universe or universe  # per-cycle cost: liquid subset
+        self._funnels = {s: ScanFunnel(s) for s in ("swing", "intraday", "meanrev")}
 
     # ----- swing: daily breakout + trend -----
     def scan_swing(self) -> list[Signal]:
         out: list[Signal] = []
+        f = self._funnels["swing"]
+        f.start_pass(len(self._universe))
         for t in self._universe:
             bars = self._feed.get_daily_bars(t)
             if bars is None or len(bars.close) < SWING.trend_sma_days + 1:
@@ -51,17 +63,26 @@ class PriceActionScanner:
             rv = relative_volume(bars)
             if hi is None or trend is None or rv is None:
                 continue
-            breakout = close > hi
-            uptrend = (not SWING.require_uptrend) or close > trend
-            vol_ok = rv >= SWING.vol_spike_mult
-            if breakout and uptrend and vol_ok:
-                out.append(Signal(SignalSource.TREND, t,
-                                  reason=f"close>{hi:.2f} 20d-high, >SMA{SWING.trend_sma_days}, rv={rv:.2f}"))
+            f.count("bars_ok")
+            if not close > hi:
+                continue
+            f.count("breakout")
+            if SWING.require_uptrend and not close > trend:
+                continue
+            f.count("uptrend")
+            if not rv >= SWING.vol_spike_mult:
+                continue
+            f.count("vol_confirm")
+            out.append(Signal(SignalSource.TREND, t,
+                              reason=f"close>{hi:.2f} 20d-high, >SMA{SWING.trend_sma_days}, rv={rv:.2f}"))
+        f.finish(len(out))
         return out
 
     # ----- intraday: opening-range / momentum breakout -----
     def scan_intraday(self) -> list[Signal]:
         out: list[Signal] = []
+        f = self._funnels["intraday"]
+        f.start_pass(len(self._intraday_universe))
         for t in self._intraday_universe:
             bars = self._feed.get_intraday_bars(t)
             if bars is None or len(bars.close) < INTRADAY.opening_range_min + 1:
@@ -72,17 +93,26 @@ class PriceActionScanner:
             rv = relative_volume(bars)
             if orh is None or rv is None:
                 continue
-            momentum = close > orh
-            above_vwap = (not INTRADAY.require_above_vwap) or (vw is not None and close > vw)
-            vol_ok = rv >= INTRADAY.min_rel_volume
-            if momentum and above_vwap and vol_ok:
-                out.append(Signal(SignalSource.MOMENTUM, t,
-                                  reason=f"close>{orh:.2f} ORH, >VWAP, rv={rv:.2f}"))
+            f.count("bars_ok")
+            if not close > orh:
+                continue
+            f.count("orb_break")
+            if INTRADAY.require_above_vwap and not (vw is not None and close > vw):
+                continue
+            f.count("above_vwap")
+            if not rv >= INTRADAY.min_rel_volume:
+                continue
+            f.count("vol_confirm")
+            out.append(Signal(SignalSource.MOMENTUM, t,
+                              reason=f"close>{orh:.2f} ORH, >VWAP, rv={rv:.2f}"))
+        f.finish(len(out))
         return out
 
     # ----- mean reversion: RSI oversold within an uptrend (contrarian) -----
     def scan_meanrev(self) -> list[Signal]:
         out: list[Signal] = []
+        f = self._funnels["meanrev"]
+        f.start_pass(len(self._universe))
         for t in self._universe:
             bars = self._feed.get_daily_bars(t)
             if bars is None or len(bars.close) < MEANREV.trend_sma_days + 1:
@@ -91,11 +121,18 @@ class PriceActionScanner:
             trend = sma(bars.close, MEANREV.trend_sma_days)
             if r is None or trend is None:
                 continue
+            f.count("bars_ok")
             close = bars.close[-1]
             # Buy oversold, but only in a longer-term uptrend (avoid falling knives).
-            if r < MEANREV.rsi_oversold and close > trend:
-                out.append(Signal(SignalSource.MEAN_REVERSION, t,
-                                  reason=f"RSI={r:.1f}<{MEANREV.rsi_oversold:.0f}, >SMA{MEANREV.trend_sma_days}"))
+            if not close > trend:
+                continue
+            f.count("uptrend")
+            if not r < MEANREV.rsi_oversold:
+                continue
+            f.count("oversold")
+            out.append(Signal(SignalSource.MEAN_REVERSION, t,
+                              reason=f"RSI={r:.1f}<{MEANREV.rsi_oversold:.0f}, >SMA{MEANREV.trend_sma_days}"))
+        f.finish(len(out))
         return out
 
     def scan_all(self) -> list[Signal]:
