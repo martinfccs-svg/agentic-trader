@@ -10,24 +10,32 @@ a distinct return stream from the time-series momentum in the swing book.
 
 2026-07-09 changes (after two sessions of zero positions):
   1. CADENCE: XSECT.rebalance_cycles replaced by scan_health.DailyRebalanceGate.
-     780 cycles was "daily" at 30s cycles; at ~5.7s cycles it silently became
-     ~74 minutes. Wall-clock (10:00 ET) survives loop-speed changes.
-  2. LIQUIDITY UNIT BUG (likely the real killer): the gate compared
-     q.avg_dollar_volume — computed from 1-MIN bars, ~390x too small — against
-     the DAILY threshold MIN_DOLLAR_VOL, same bug fixed in the intraday engine
-     on Jul 3. Every name could fail this gate on every rebalance. Now tests
-     daily-bar dollar volume, like intraday does.
-  3. TRANSPARENCY: every rebalance logs ranked/insufficient/no-quote/liquidity
-     counts, the top-N with scores, holdings, and each ENTER/EXIT — plus a
-     CRITICAL naming data starvation when nothing is rankable.
-  4. ROBUSTNESS: exits no longer skipped when the kill switch blocks opens;
-     per-ticker try/except so one bad name can't abort a rebalance or the
-     manage loop; broker-side leg fills booked via reconcile_filled_legs.
+  2. LIQUIDITY UNIT BUG: gate now tests daily-bar dollar volume (was 1-min,
+     ~390x too strict — same bug fixed in the intraday engine on Jul 3).
+  3. TRANSPARENCY: every rebalance logs per-gate stats, top-N, ENTER/EXIT.
+  4. ROBUSTNESS: per-ticker try/except; broker-side leg fills reconciled.
+
+2026-07-09 PM incident fixes (the -$196 forced rotation at 15:03 UTC):
+  5. DEGRADED-DATA GUARD: with the quote breaker open, only 2/63 names were
+     rankable; the rebalance treated that 2-name "top 3" as authoritative
+     and dumped INTC/MU. A rotation now requires minimum ranking coverage
+     (XSECT_MIN_RANKABLE, default max(2*top_n, 40% of universe)); below it,
+     the whole rotation is SKIPPED — no exits, no entries — and the gate
+     re-arms to retry once the feed recovers.
+  6. ROTATION ATOMICITY: if the kill switch blocks entries, the exits are
+     skipped too. A rotation is a swap; selling the old names while unable
+     to buy the new ones just liquidates the book into an outage. (Stop-
+     loss exits in manage_open_positions remain ungated — those ARE
+     risk-reducing and always run.)
+  7. QUOTE BURST REDUCTION: ranking no longer quotes all 63 names (that
+     burst helped trip the 429s/breaker). Ranking uses daily bars only;
+     quotes are fetched just for the handful of names actually traded.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 from config import MIN_DOLLAR_VOL, MIN_PRICE, XSECT
 from indicators import avg_dollar_volume, trailing_return
@@ -37,6 +45,11 @@ from safety import market_is_open
 from scan_health import DailyRebalanceGate
 
 log = logging.getLogger("xsectmom")
+
+# Minimum rankable names required before a rotation may trade. 0 = auto:
+# max(2 * top_n, 40% of universe). Below the threshold the ranking is
+# considered blind (feed degradation) and the rotation is skipped.
+XSECT_MIN_RANKABLE = int(os.getenv("XSECT_MIN_RANKABLE", "0"))
 
 
 class CrossSectionalMomentumEngine:
@@ -50,29 +63,31 @@ class CrossSectionalMomentumEngine:
         return
 
     def _rank(self):
-        """Score the universe. Returns (ranked tickers, stats) — the stats make
-        a zero-position rebalance explain itself in one log line."""
+        """Score the universe from DAILY BARS ONLY. Returns (ranked, stats).
+
+        Deliberately quote-free: quoting all 63 names during ranking helped
+        trip the Finnhub 429s / breaker on 2026-07-09. Price and liquidity
+        gates use the daily bars already in hand; live quotes are fetched
+        later, only for the few names actually being traded."""
         scored = []
         stats = {"universe": len(self._universe), "no_bars": 0,
-                 "no_return": 0, "no_quote": 0, "liquidity_reject": 0}
+                 "no_return": 0, "price_reject": 0, "liquidity_reject": 0}
         for t in self._universe:
             bars = self._feed.get_daily_bars(t)
-            if bars is None:
+            if bars is None or not bars.close:
                 stats["no_bars"] += 1
                 continue
             ret = trailing_return(bars.close, XSECT.lookback_days, XSECT.skip_days)
             if ret is None:
                 stats["no_return"] += 1        # insufficient history for lookback
                 continue
-            q = self._feed.get_quote(t)
-            if q is None:
-                stats["no_quote"] += 1
+            if bars.close[-1] < MIN_PRICE:
+                stats["price_reject"] += 1
                 continue
-            # Liquidity on DAILY dollar volume. q.avg_dollar_volume comes from
-            # 1-min bars (~390x too small vs a daily threshold) — the same unit
-            # bug fixed in the intraday engine on Jul 3, previously unfixed here.
+            # Liquidity on DAILY dollar volume (the Jul-3 intraday fix,
+            # previously unfixed here: quote-level ADV was ~390x too small).
             daily_dv = avg_dollar_volume(bars)
-            if q.price < MIN_PRICE or (daily_dv or 0) < MIN_DOLLAR_VOL:
+            if (daily_dv or 0) < MIN_DOLLAR_VOL:
                 stats["liquidity_reject"] += 1
                 continue
             scored.append((ret, t))
@@ -85,34 +100,54 @@ class CrossSectionalMomentumEngine:
             return
         if not market_is_open():
             log.info("xsect rebalance: gate open but market closed — re-arming")
-            self._gate._last_run_date = None    # don't burn the day on a holiday
+            self._gate.rearm()                  # don't burn the day on a holiday
             return
         self.rebalance()
 
     def rebalance(self):
         scored, stats = self._rank()
-        target = {t for _, t in scored[:XSECT.top_n]}
         held = {t for t, p in self._broker.positions.items()
                 if p.system is System.XSECTMOM}
         top_str = ", ".join(f"{t}({r:+.1%})" for r, t in scored[:XSECT.top_n]) or "EMPTY"
         log.warning("xsect rebalance: ranked=%d/%d (no_bars=%d no_return=%d "
-                    "no_quote=%d liquidity_reject=%d) | top%d: %s | held=%s",
+                    "price_reject=%d liquidity_reject=%d) | top%d: %s | held=%s",
                     len(scored), stats["universe"], stats["no_bars"],
-                    stats["no_return"], stats["no_quote"],
+                    stats["no_return"], stats["price_reject"],
                     stats["liquidity_reject"], XSECT.top_n, top_str,
                     sorted(held) or "none")
-        if not scored:
-            log.critical("xsect rebalance: ZERO rankable names. no_return=%d "
-                         "dominating means the daily-candle fetch is shorter "
-                         "than lookback %d+skip %d (data starvation — widen "
-                         "feed_layer window); liquidity_reject=%d dominating "
-                         "means the dollar-volume gate is still mis-scaled.",
-                         stats["no_return"], XSECT.lookback_days,
-                         XSECT.skip_days, stats["liquidity_reject"])
+
+        # ---- DEGRADED-DATA GUARD (2026-07-09: the -$196 forced rotation) ----
+        # A ranking built from a sliver of the universe is blind; acting on it
+        # sold INTC/MU because they "fell out" of a top-3 computed from 2
+        # names. Below minimum coverage: no exits, no entries, retry later.
+        min_rankable = XSECT_MIN_RANKABLE or max(
+            2 * XSECT.top_n, int(0.4 * stats["universe"]))
+        if len(scored) < min_rankable:
+            log.critical("xsect rebalance: DEGRADED DATA — only %d/%d names "
+                         "rankable (need >=%d). Rotation SKIPPED (no exits, "
+                         "no entries); gate re-armed to retry once the feed "
+                         "recovers. If no_return dominates it's history "
+                         "starvation; if no_bars dominates the candle "
+                         "endpoint/breaker is down.",
+                         len(scored), stats["universe"], min_rankable)
+            self._gate.rearm()
             return
 
-        # Sell names that fell out of the top N — even when the kill switch
-        # blocks opens: exits reduce risk and must never be gated by it.
+        # ---- ROTATION ATOMICITY (2026-07-09) --------------------------------
+        # A rotation is a swap: selling the old names while the kill switch
+        # blocks buying the new ones just liquidates the book into an outage.
+        # If entries can't happen, skip the whole rotation and retry later.
+        # (Stop-loss exits in manage_open_positions remain ungated.)
+        if not self._kill.may_open(System.XSECTMOM):
+            log.warning("xsect rebalance: kill switch active — rotation "
+                        "SKIPPED whole (exits AND entries); holdings keep "
+                        "their broker-side stops; gate re-armed")
+            self._gate.rearm()
+            return
+
+        target = {t for _, t in scored[:XSECT.top_n]}
+
+        # Sell names that fell out of the top N.
         for ticker in sorted(held - target):
             q = self._feed.get_quote(ticker)
             pos = self._broker.positions.get(ticker)
@@ -128,11 +163,8 @@ class CrossSectionalMomentumEngine:
                 log.error("xsect rebalance: exit %s failed (retry next "
                           "rebalance): %s", ticker, e)
 
-        # Buy new entrants.
-        if not self._kill.may_open(System.XSECTMOM):
-            log.warning("xsect rebalance: kill switch blocks entries — "
-                        "exits done, entries skipped")
-            return
+        # Buy new entrants (kill switch already verified before the exits —
+        # rotation atomicity: we only get here if entries are permitted).
         for ret, ticker in scored[:XSECT.top_n]:
             if ticker in self._broker.positions:
                 continue
