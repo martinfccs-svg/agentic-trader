@@ -99,8 +99,12 @@ class CrossSectionalMomentumEngine:
         if not self._gate.should_run():
             return
         if not market_is_open():
-            log.info("xsect rebalance: gate open but market closed — re-arming")
-            self._gate.rearm()                  # don't burn the day on a holiday
+            # Fire time is >=10:00 ET, so "closed" here means holiday or
+            # post-16:00 ET — no rebalance is possible for the rest of the
+            # day. Mark done; re-arming would loop the gate every cycle.
+            log.info("xsect rebalance: gate open but market closed — "
+                     "marking today done")
+            self._gate.mark_done_today()
             return
         self.rebalance()
 
