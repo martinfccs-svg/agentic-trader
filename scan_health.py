@@ -180,6 +180,7 @@ class DailyRebalanceGate:
             "REBALANCE_GATE_STATE", "/data/rebalance_gate_state.txt")
         self._last_run_date = self._load_state()
         self._logged_wait_date = None
+        self._retry_not_before = 0.0
         if self._last_run_date is not None:
             log.info("rebalance gate: restored state — last ran %s",
                      self._last_run_date)
@@ -204,19 +205,36 @@ class DailyRebalanceGate:
                         "a redeploy may re-fire the gate today",
                         self._state_path, e)
 
-    def rearm(self) -> None:
-        """Allow the gate to fire again today. Call when the rebalance was
-        skipped after the gate opened (market closed, degraded data, kill
-        switch) so it retries once conditions recover."""
+    def rearm(self, retry_after_minutes: float = 15.0) -> None:
+        """Allow the gate to fire again today, after a cooldown. Call when
+        the rebalance was skipped after the gate opened (degraded data,
+        kill switch) so it retries once conditions recover. The cooldown
+        prevents the fire->skip->rearm loop from retrying every cycle
+        (observed 2026-07-09: CRITICAL spam every ~5s while degraded)."""
         self._last_run_date = None
+        self._retry_not_before = time.monotonic() + retry_after_minutes * 60
         self._save_state()
-        log.info("rebalance gate: re-armed (will retry today)")
+        log.info("rebalance gate: re-armed (next retry in >=%.0f min)",
+                 retry_after_minutes)
+
+    def mark_done_today(self, now: datetime | None = None) -> None:
+        """Record today as handled WITHOUT running. Use when the gate fired
+        but no rebalance is possible for the rest of the day (market closed
+        after fire time: holiday or post-16:00 ET) — re-arming in that case
+        loops the gate every cycle until midnight."""
+        now_et = (now or datetime.now(tz=ET)).astimezone(ET)
+        self._last_run_date = now_et.date()
+        self._save_state()
+        log.info("rebalance gate: marked done for %s (market closed)",
+                 self._last_run_date)
 
     def should_run(self, now: datetime | None = None) -> bool:
         now_et = (now or datetime.now(tz=ET)).astimezone(ET)
         today = now_et.date()
         if self._last_run_date == today:
             return False                      # already ran this date
+        if time.monotonic() < self._retry_not_before:
+            return False                      # in retry cooldown after rearm
         target = now_et.replace(hour=self._hour, minute=self._minute,
                                 second=0, microsecond=0)
         if now_et < target:
