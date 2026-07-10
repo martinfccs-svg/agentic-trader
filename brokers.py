@@ -173,6 +173,56 @@ class AlpacaBroker:
                 "BROKER=alpaca, ALPACA_PAPER=false, and LIVE_CONFIRM to the exact phrase."
             )
 
+    # ---------------- persistent position registry (2026-07-10) -----------
+    # Reconciliation attributed positions to systems by scanning RECENT
+    # orders for the bot's coid prefix. Swing positions are held for days
+    # or weeks; once the entry order ages out of the scan window, reconcile
+    # can't attribute the holding and halts as an orphan (or misattributes
+    # it). Provenance must not depend on order recency: every open/close
+    # now writes a small registry to the /data volume, and reconcile reads
+    # it FIRST, with the coid scan as fallback. Registry corruption or a
+    # missing volume degrades gracefully to the old behavior.
+
+    def _position_state_path(self) -> str:
+        import os as _os
+        return _os.getenv("POSITION_STATE_PATH", "/data/position_state.json")
+
+    def _save_position_state(self) -> None:
+        import json as _json
+        import os as _os
+        state = {}
+        for t, p in self.positions.items():
+            state[t] = {
+                "system": p.system.value,
+                "shares": p.shares,
+                "entry_price": p.entry_price,
+                "entry_stop": p.entry_stop,
+                "stop_price": p.stop_price,
+                "entry_time": p.entry_time,
+                "source": p.source.value if getattr(p, "source", None) else None,
+            }
+        path = self._position_state_path()
+        try:
+            d = _os.path.dirname(path) or "."
+            _os.makedirs(d, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                _json.dump(state, fh)
+            _os.replace(tmp, path)                 # atomic on POSIX
+        except OSError as e:
+            log.warning("[ALPACA] position registry write failed (%s) — "
+                        "reconcile after a long hold may fall back to the "
+                        "order scan. Mount a volume at /data.", e)
+
+    def _load_position_state(self) -> dict:
+        import json as _json
+        try:
+            with open(self._position_state_path(), encoding="utf-8") as fh:
+                state = _json.load(fh)
+            return state if isinstance(state, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
     def buy(self, ticker, shares, price, system, source, stop_price):
         self._guard_live()
         from alpaca.common.exceptions import APIError
@@ -267,6 +317,7 @@ class AlpacaBroker:
                        stop_price, source, entry_stop=stop_price,
                        high_water=entry_price, last_price=entry_price)
         self.positions[ticker] = pos
+        self._save_position_state()
         audit.fill(ticker=ticker, qty=qty, price=round(entry_price, 2),
                    stop=round(stop_price, 2), system=system.value, coid=coid,
                    via=price_src)
@@ -310,6 +361,7 @@ class AlpacaBroker:
             pos.entry_price = fill
             pos.high_water = max(pos.high_water, fill)
             self._pending_entry_fills.pop(ticker, None)
+            self._save_position_state()
 
     def _cancel_open_orders(self, ticker) -> None:
         """Cancel all open orders for a ticker. Bracket stop/target legs hold
@@ -437,6 +489,7 @@ class AlpacaBroker:
                             "booking at last mark %.2f (estimate)",
                             ticker, fill)
             self.positions.pop(ticker, None)
+            self._save_position_state()
             realized = (fill - pos.entry_price) * pos.shares
             self.realized_pnl[pos.system] += realized
             self.realized_today += realized
@@ -504,6 +557,7 @@ class AlpacaBroker:
         price_src = "fill" if fill is not None else "quote-est"
 
         self.positions.pop(ticker, None)
+        self._save_position_state()
         realized = (exit_price - pos.entry_price) * pos.shares
         self.realized_pnl[pos.system] += realized
         self.realized_today += realized
@@ -528,9 +582,12 @@ class AlpacaBroker:
         and later 404'd. This must run BEFORE the first cycle.
 
         Returns the list of ORPHAN tickers: broker holdings whose origin
-        can't be matched to a bot order today. If non-empty, the caller
-        must HALT — unknown holdings are unknown risk; do not liquidate
-        silently, a human should look.
+        can't be matched to the persisted registry OR a bot order in the
+        recent order scan. If non-empty, the caller must HALT — unknown
+        holdings are unknown risk; do not liquidate silently, a human
+        should look. (2026-07-10: registry is now the PRIMARY source, so
+        multi-day swing holds reconcile correctly long after their entry
+        orders age out of the scan window.)
         """
         from alpaca.trading.enums import QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
@@ -564,25 +621,44 @@ class AlpacaBroker:
             if sp and ("new" in status or "held" in status or "accepted" in status):
                 stop_by_ticker[o.symbol] = float(sp)
 
+        registry = self._load_position_state()
+
         for p in broker_positions:
             ticker = p.symbol
-            system = sys_by_ticker.get(ticker)
+            reg = registry.get(ticker)
+            system = None
+            if reg:
+                system = next((s for s in System
+                               if s.value == reg.get("system")), None)
+                if system:
+                    log.info("[ALPACA] reconcile: %s attributed to %s via "
+                             "position registry", ticker, system.value)
+            if system is None:
+                system = sys_by_ticker.get(ticker)
             if system is None:
                 orphans.append(ticker)
                 log.critical("[ALPACA] reconcile: ORPHAN %s x%s — no bot "
                              "order found; resolve manually before trading",
                              ticker, p.qty)
                 continue
-            entry = float(p.avg_entry_price)
+            entry = float(p.avg_entry_price)        # broker fill = truth
             qty = float(p.qty)
             last = float(getattr(p, "current_price", None) or entry)
-            stop = stop_by_ticker.get(ticker, round(entry * 0.99, 2))
+            # Stop preference: live leg order > registry > 1% fallback
+            stop = stop_by_ticker.get(ticker)
+            if stop is None and reg and reg.get("stop_price"):
+                stop = float(reg["stop_price"])
+            if stop is None:
+                stop = round(entry * 0.99, 2)
+                log.warning("[ALPACA] reconcile: %s has no discoverable stop "
+                            "— defaulting to 1%% under entry", ticker)
             self.positions[ticker] = Position(
                 ticker, system, qty, entry, time.time(), stop, None,
                 entry_stop=stop, high_water=max(entry, last), last_price=last)
             log.warning("[ALPACA] reconcile: re-adopted %s x%s [%s] "
                         "entry=%.2f stop=%.2f", ticker, qty, system.value,
                         entry, stop)
+        self._save_position_state()   # prune closed/stale entries
         return orphans
 
     def mark(self, ticker, price):
