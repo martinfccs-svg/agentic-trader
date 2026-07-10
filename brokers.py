@@ -154,6 +154,9 @@ class AlpacaBroker:
         self.positions: dict[str, Position] = {}
         self.realized_pnl: dict[System, float] = {s: 0.0 for s in System}
         self.realized_today = 0.0
+        # Entry orders whose actual fill hasn't been confirmed yet:
+        # ticker -> entry order id. Drained by refresh_entry_fills().
+        self._pending_entry_fills: dict[str, str] = {}
         # trade_logger.print_scorecard reads broker.start_equity; its absence
         # crashed the shutdown path on 2026-07-06 (AttributeError).
         try:
@@ -231,7 +234,7 @@ class AlpacaBroker:
                         ticker, qty, system.value, coid)
 
         try:
-            self._client.submit_order(order)
+            submitted = self._client.submit_order(order)
         except APIError as e:
             if "client_order_id" in str(e).lower() or "duplicate" in str(e).lower():
                 log.warning("[ALPACA] duplicate order suppressed for %s "
@@ -239,12 +242,74 @@ class AlpacaBroker:
                             "stands", ticker, coid)
                 return None
             raise
-        pos = Position(ticker, system, qty, price, time.time(),
-                       stop_price, source, entry_stop=stop_price, high_water=price, last_price=price)
+
+        # -- Entry-fill accuracy (2026-07-10 patch) ---------------------------
+        # sell() has recorded actual fills since Jul 8; entries still booked
+        # the pre-trade quote, overstating profits by the entry slippage
+        # (~$430 unattributed Jul 9, ~$755 Jul 10 — books said +$514 on a day
+        # the broker settled at -$240). Poll the entry fill briefly; if it
+        # hasn't filled yet, book the quote provisionally and let
+        # refresh_entry_fills() correct it within a cycle or two.
+        entry_price, price_src = price, "quote-est"
+        order_id = getattr(submitted, "id", None)
+        if order_id is not None:
+            fill = self._await_fill_price(order_id, timeout=3.0)
+            if fill is not None:
+                entry_price, price_src = fill, "fill"
+            else:
+                self._pending_entry_fills[ticker] = str(order_id)
+        if price_src == "fill" and abs(entry_price - price) > 0.005:
+            log.warning("[ALPACA] entry slippage %s: quote %.4f -> fill %.4f "
+                        "(%+.4f/share)", ticker, price, entry_price,
+                        entry_price - price)
+
+        pos = Position(ticker, system, qty, entry_price, time.time(),
+                       stop_price, source, entry_stop=stop_price,
+                       high_water=entry_price, last_price=entry_price)
         self.positions[ticker] = pos
-        audit.fill(ticker=ticker, qty=qty, price=round(price, 2),
-                   stop=round(stop_price, 2), system=system.value, coid=coid)
+        audit.fill(ticker=ticker, qty=qty, price=round(entry_price, 2),
+                   stop=round(stop_price, 2), system=system.value, coid=coid,
+                   via=price_src)
         return pos
+
+    def refresh_entry_fills(self) -> None:
+        """Correct provisionally-booked entry prices once their orders fill.
+        Called from reconcile_filled_legs(), i.e. every manage cycle, so a
+        quote-booked entry is corrected within seconds of its fill — every
+        downstream realized/R-multiple then uses the broker's actual fill.
+        Never raises."""
+        from alpaca.common.exceptions import APIError
+        for ticker in list(self._pending_entry_fills):
+            pos = self.positions.get(ticker)
+            if pos is None:                       # closed before confirmation
+                self._pending_entry_fills.pop(ticker, None)
+                continue
+            order_id = self._pending_entry_fills[ticker]
+            try:
+                o = self._client.get_order_by_id(order_id)
+            except APIError as e:
+                log.warning("[ALPACA] entry-fill refresh %s: %s", ticker, e)
+                continue
+            status = str(getattr(o, "status", "")).lower()
+            if any(t in status for t in ("canceled", "expired", "rejected")):
+                # Entry never filled — the position we booked doesn't exist.
+                log.error("[ALPACA] entry order for %s ended %s — removing "
+                          "phantom position from the tracker", ticker, status)
+                self.positions.pop(ticker, None)
+                self._pending_entry_fills.pop(ticker, None)
+                continue
+            if not (self._is_fully_filled(o)
+                    and getattr(o, "filled_avg_price", None)):
+                continue                          # still working; retry next cycle
+            fill = float(o.filled_avg_price)
+            if abs(fill - pos.entry_price) > 0.005:
+                log.warning("[ALPACA] entry CORRECTED %s: quote-est %.4f -> "
+                            "actual fill %.4f (%+.4f/share x %.0f)",
+                            ticker, pos.entry_price, fill,
+                            fill - pos.entry_price, pos.shares)
+            pos.entry_price = fill
+            pos.high_water = max(pos.high_water, fill)
+            self._pending_entry_fills.pop(ticker, None)
 
     def _cancel_open_orders(self, ticker) -> None:
         """Cancel all open orders for a ticker. Bracket stop/target legs hold
@@ -283,6 +348,14 @@ class AlpacaBroker:
             time.sleep(0.25)
         return "timeout"
 
+    @staticmethod
+    def _is_fully_filled(order) -> bool:
+        """'partially_filled'.endswith('filled') is True — the naive check
+        would book a partial fill's avg price against the full position qty.
+        Require terminal FILLED status exactly."""
+        status = str(getattr(order, "status", "")).lower()
+        return status.endswith("filled") and "partial" not in status
+
     def _await_fill_price(self, order_id, timeout: float = 3.0):
         """Poll an order briefly for its actual filled_avg_price. Market
         closes usually fill sub-second; if not filled in time, return None
@@ -292,7 +365,7 @@ class AlpacaBroker:
         while time.monotonic() < deadline:
             try:
                 o = self._client.get_order_by_id(order_id)
-                if str(getattr(o, "status", "")).lower().endswith("filled") \
+                if self._is_fully_filled(o) \
                         and getattr(o, "filled_avg_price", None):
                     return float(o.filled_avg_price)
             except APIError as e:
@@ -337,6 +410,9 @@ class AlpacaBroker:
         Returns {ticker: realized} so the calling engine can feed its own
         trade logger. Never raises.
         """
+        # First, correct any entries booked at quote while their fill was
+        # pending — zero new wiring: engines already call this every cycle.
+        self.refresh_entry_fills()
         out: dict[str, float] = {}
         candidates = [t for t, p in self.positions.items()
                       if system is None or p.system is system]
