@@ -61,10 +61,22 @@ def check_bar_depth(feed, universe, enabled_systems, sample_size: int = 8):
     (empty = healthy). Never raises; logs and audits loudly instead."""
     sample = list(universe)[:sample_size]
     depths: dict[str, int] = {}
+
+    def _depth(bars) -> int:
+        """Bars may be a list OR a Bars object with a .close array — the
+        production feed returns the latter, and len(Bars) raised TypeError,
+        silently disabling this guard on every boot until 2026-07-11."""
+        if bars is None:
+            return 0
+        closes = getattr(bars, "close", None)
+        if closes is not None:
+            return len(closes)
+        return len(bars)
+
     for ticker in sample:
         try:
             bars = feed.get_daily_bars(ticker)
-            depths[ticker] = len(bars) if bars else 0
+            depths[ticker] = _depth(bars)
         except AttributeError:
             log.warning("bar-depth check skipped: feed has no "
                         "get_daily_bars (simulated feed?)")
