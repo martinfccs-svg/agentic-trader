@@ -615,7 +615,13 @@ class AlpacaBroker:
                 if len(parts) >= 3:
                     system = next((s for s in System if s.value == parts[1]), None)
                     if system:
-                        sys_by_ticker[o.symbol] = system
+                        # Orders arrive NEWEST FIRST. setdefault = the newest
+                        # bot order for a ticker wins. The old unconditional
+                        # assignment let the OLDEST win — on 2026-07-11 it
+                        # attributed META to a Jul-8 intraday order instead
+                        # of the Jul-10 swing order, poisoned the registry,
+                        # and boot-looped the service all weekend.
+                        sys_by_ticker.setdefault(o.symbol, system)
             sp = getattr(o, "stop_price", None)
             status = str(getattr(o, "status", "")).lower()
             if sp and ("new" in status or "held" in status or "accepted" in status):
@@ -626,15 +632,27 @@ class AlpacaBroker:
         for p in broker_positions:
             ticker = p.symbol
             reg = registry.get(ticker)
-            system = None
+            reg_system = None
             if reg:
-                system = next((s for s in System
-                               if s.value == reg.get("system")), None)
-                if system:
+                reg_system = next((s for s in System
+                                   if s.value == reg.get("system")), None)
+            order_system = sys_by_ticker.get(ticker)
+
+            if reg_system and order_system and reg_system is not order_system:
+                # Disagreement: the newest bot ORDER is direct evidence of
+                # who traded this ticker last; a stale/poisoned registry
+                # entry must not outvote it. Heal the registry (saved at
+                # the end of reconcile) and say so loudly.
+                log.warning("[ALPACA] reconcile: %s registry says %s but the "
+                            "newest bot order says %s — trusting the order "
+                            "and correcting the registry",
+                            ticker, reg_system.value, order_system.value)
+                system = order_system
+            else:
+                system = reg_system or order_system
+                if system and reg_system:
                     log.info("[ALPACA] reconcile: %s attributed to %s via "
                              "position registry", ticker, system.value)
-            if system is None:
-                system = sys_by_ticker.get(ticker)
             if system is None:
                 orphans.append(ticker)
                 log.critical("[ALPACA] reconcile: ORPHAN %s x%s — no bot "
