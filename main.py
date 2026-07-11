@@ -158,6 +158,7 @@ def run(loop: bool, cycles: int = 40):
             log.critical("startup reconciliation failed (%s) — HALTING; "
                          "cannot trade without knowing broker state", e)
             audit.halt(reason=f"reconciliation failed: {e}")
+            time.sleep(600)   # gentle halt: no restart storm
             return
         audit.reconcile(adopted=sorted(broker.positions), orphans=orphans,
                         profile=sorted(ENABLED_SYSTEMS))
@@ -165,6 +166,7 @@ def run(loop: bool, cycles: int = 40):
             log.critical("ORPHAN positions at broker: %s — HALTING. Resolve "
                          "in the Alpaca dashboard, then restart.", orphans)
             audit.halt(reason=f"orphan positions at broker: {orphans}")
+            time.sleep(600)   # gentle halt: no restart storm
             return
         # A position belonging to a BENCHED system has no engine to manage
         # its stops/exits. Refuse to run rather than babysit it blind.
@@ -175,6 +177,14 @@ def run(loop: bool, cycles: int = 40):
                          "Close them manually or re-enable the system via "
                          "ENABLED_SYSTEMS, then restart.", benched_held)
             audit.halt(reason=f"positions held by benched system: {benched_held}")
+            # Deliberate halt, but Railway restarts exited processes
+            # immediately — on 2026-07-11 that turned this halt into a
+            # 2-second boot loop (and a ntfy ping per boot, all weekend).
+            # Sleep before exiting so the loop is gentle and the phone
+            # gets one ping per ~10 minutes, not per 2 seconds.
+            log.critical("halted — sleeping 10 minutes before exit to "
+                         "prevent a restart storm")
+            time.sleep(600)
             return
 
     # Verify the feed returns enough daily history for each enabled
