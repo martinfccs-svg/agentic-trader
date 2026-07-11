@@ -251,6 +251,13 @@ class AlpacaBroker:
                 log.warning("[ALPACA] pre-buy position check %s: %s", ticker, e)
             # 404 = no existing position: safe to proceed.
 
+        # --- Stop persistence: DAY legs die at the close. --------------------
+        # Discovered 2026-07-11: Friday's bracket stop legs expired at the
+        # bell, leaving the weekend-held swing/xsect positions with NO live
+        # broker-side stop. Multi-day systems need GTC brackets; only the
+        # intraday book (flat by the close anyway) should use DAY.
+        tif = TimeInForce.DAY if system is System.INTRADAY else TimeInForce.GTC
+
         # --- Duplicate guard #2: deterministic client_order_id. -------------
         # Same (system, ticker, minute) after a restart hashes to the same id,
         # so Alpaca rejects the re-fired order instead of filling it again.
@@ -268,7 +275,7 @@ class AlpacaBroker:
             target = round(price + TAKE_PROFIT_R * risk_per_share, 2)
             order = LimitOrderRequest(
                 symbol=ticker, qty=qty, side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY, limit_price=limit,
+                time_in_force=tif, limit_price=limit,
                 order_class=OrderClass.BRACKET,
                 stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
                 take_profit=TakeProfitRequest(limit_price=target),
@@ -278,7 +285,7 @@ class AlpacaBroker:
                         ticker, qty, limit, stop_price, target, system.value, coid)
         else:
             order = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY,
-                                       time_in_force=TimeInForce.DAY,
+                                       time_in_force=tif,
                                        client_order_id=coid)
             log.warning("[ALPACA] MARKET BUY %s x%d [%s] coid=%s",
                         ticker, qty, system.value, coid)
