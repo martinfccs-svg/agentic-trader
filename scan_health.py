@@ -140,6 +140,7 @@ class ScanFunnel:
         self._emit_every = (emit_every_secs if emit_every_secs is not None
                             else float(os.getenv("FUNNEL_EMIT_SECS", "300")))
         self._last_emit = 0.0
+        self._last_emitted: tuple | None = None
         self._universe = 0
         self._stages: dict[str, int] = {}
 
@@ -151,10 +152,18 @@ class ScanFunnel:
         self._stages[stage] = self._stages.get(stage, 0) + 1
 
     def finish(self, signals: int) -> None:
+        """Emit immediately when the funnel RESULT CHANGES (new signal, a
+        gate count moved); otherwise rate-limit. The original rule emitted
+        every pass while signals>0 — a held ticker that keeps re-signaling
+        produced one identical line per cycle (2026-07-11: 11 duplicates in
+        11 min; ~650/hour at market cadence)."""
         now = time.monotonic()
-        if signals == 0 and (now - self._last_emit) < self._emit_every:
+        snapshot = (self._universe, tuple(sorted(self._stages.items())), signals)
+        changed = snapshot != self._last_emitted
+        if not changed and (now - self._last_emit) < self._emit_every:
             return
         self._last_emit = now
+        self._last_emitted = snapshot
         chain = " ".join(f"{k}={v}" for k, v in self._stages.items())
         log.info("funnel[%s]: universe=%d %s -> signals=%d",
                  self.strategy, self._universe, chain or "(no gates hit)",
