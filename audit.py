@@ -18,8 +18,14 @@ Design rules:
 
 Configuration (Railway variables):
   AUDIT_LOG_PATH   default /data/audit.jsonl  (mount a volume at /data)
-  NTFY_TOPIC       your existing ntfy.sh topic; empty disables mirroring
-  NTFY_SERVER      default https://ntfy.sh
+  NTFY_TOPIC       topic name OR full URL (https://ntfy.sh/mytopic works);
+                   empty disables mirroring
+  NTFY_SERVER      default https://ntfy.sh (self-hosted servers supported)
+  NTFY_TOKEN       optional ntfy access token (tk_...) sent as
+                   "Authorization: Bearer <token>". Leave unset for public
+                   topics. A bad token can NEVER crash trading: auth
+                   rejections are logged once and mirroring continues to
+                   fail soft while audit.jsonl keeps recording.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import json
 import logging
 import os
 import threading
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -36,6 +43,18 @@ log = logging.getLogger("audit")
 AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "/data/audit.jsonl")
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
+NTFY_TOKEN = os.getenv("NTFY_TOKEN", "").strip()
+
+
+def _ntfy_url() -> str:
+    """Accept either a bare topic name or a pasted full URL in NTFY_TOPIC.
+    (2026-07-13: a config push mixed the two conventions and crashed the
+    deploy — the mirror must tolerate both, and misconfiguration must
+    degrade to a logged warning, never an exception.)"""
+    t = NTFY_TOPIC
+    if t.startswith("http://") or t.startswith("https://"):
+        return t.rstrip("/")
+    return f"{NTFY_SERVER}/{t}"
 
 # Events mirrored to ntfy.sh by default. 'fill' is deliberately included:
 # every real order deserves a phone notification.
@@ -73,15 +92,34 @@ def _resolve_path() -> str:
     return _effective_path
 
 
+_auth_warned = False
+
+
 def _post_ntfy(title: str, body: str, priority: str, tags: str) -> None:
+    global _auth_warned
     try:
+        headers = {"Title": title, "Priority": priority, "Tags": tags}
+        if NTFY_TOKEN:
+            headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
         req = urllib.request.Request(
-            f"{NTFY_SERVER}/{NTFY_TOPIC}",
+            _ntfy_url(),
             data=body.encode("utf-8"),
-            headers={"Title": title, "Priority": priority, "Tags": tags},
+            headers=headers,
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            if not _auth_warned:
+                _auth_warned = True
+                log.error("audit: ntfy AUTH REJECTED (%d) — phone alerts are "
+                          "DOWN. Check NTFY_TOKEN (expects an ntfy access "
+                          "token like tk_..., sent as Bearer) and topic "
+                          "permissions. audit.jsonl still records everything; "
+                          "this warning fires once per process.", e.code)
+        else:
+            log.warning("audit: ntfy post failed (HTTP %d) — JSONL still "
+                        "written", e.code)
     except Exception as e:  # noqa: BLE001 — mirror is best-effort
         log.warning("audit: ntfy post failed (%s) — JSONL still written", e)
 
