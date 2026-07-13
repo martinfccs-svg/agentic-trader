@@ -32,6 +32,7 @@ from intraday_engine import IntradayRiskEngine
 from kill_switch import KillSwitch
 from meanrev_engine import MeanReversionEngine
 from models import System
+from notifier import Notifier
 from router import SignalRouter
 from scanner import PriceActionScanner
 from swing_engine import SwingRiskEngine
@@ -52,11 +53,12 @@ def run_backtest(feed: HistoricalFeed, out_path: str = "backtest_trades.jsonl"):
         return _dt.datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=_dt.timezone.utc).timestamp()
     broker = PaperBroker(recorder=recorder, clock=_sim_clock)
     logger = TradeLogger(path="backtest_signals.jsonl")
+    notifier = Notifier()
     kill = KillSwitch(feed, broker)
-    swing = SwingRiskEngine(feed, broker, kill, logger)
-    intraday = IntradayRiskEngine(feed, broker, kill, logger)   # no-op (no 1-min bars)
-    meanrev = MeanReversionEngine(feed, broker, kill, logger)
-    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, UNIVERSE)
+    swing = SwingRiskEngine(feed, broker, kill, logger, notifier)
+    intraday = IntradayRiskEngine(feed, broker, kill, logger, notifier)   # no-op (no 1-min bars)
+    meanrev = MeanReversionEngine(feed, broker, kill, logger, notifier)
+    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, notifier, UNIVERSE)
     router = SignalRouter({System.SWING: swing, System.INTRADAY: intraday,
                            System.MEANREV: meanrev, System.XSECTMOM: xsect})
     scanner = PriceActionScanner(feed, UNIVERSE)

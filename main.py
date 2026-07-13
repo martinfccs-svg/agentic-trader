@@ -27,6 +27,7 @@ from feed_layer import SimulatedFeed, build_feed
 from intraday_engine import IntradayRiskEngine
 from kill_switch import KillSwitch
 from models import System
+from notifier import Notifier
 from router import SignalRouter
 from safety import market_is_open, near_close, startup_banner
 from scanner import PriceActionScanner
@@ -65,15 +66,16 @@ def build():
     recorder = TradeRecorder()          # writes trades.jsonl for Monte Carlo
     broker = build_broker(recorder=recorder)
     logger = TradeLogger()
+    notifier = Notifier()
     kill = KillSwitch(feed, broker)
 
-    swing = SwingRiskEngine(feed, broker, kill, logger) \
+    swing = SwingRiskEngine(feed, broker, kill, logger, notifier) \
         if "swing" in ENABLED_SYSTEMS else None
-    intraday = IntradayRiskEngine(feed, broker, kill, logger) \
+    intraday = IntradayRiskEngine(feed, broker, kill, logger, notifier) \
         if "intraday" in ENABLED_SYSTEMS else None
-    meanrev = MeanReversionEngine(feed, broker, kill, logger) \
+    meanrev = MeanReversionEngine(feed, broker, kill, logger, notifier) \
         if "meanrev" in ENABLED_SYSTEMS else None
-    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, UNIVERSE) \
+    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, notifier, UNIVERSE) \
         if "xsectmom" in ENABLED_SYSTEMS else None
 
     if intraday is not None:

@@ -19,8 +19,9 @@ log = logging.getLogger("intraday")
 
 
 class IntradayRiskEngine:
-    def __init__(self, feed, broker, kill, logger):
+    def __init__(self, feed, broker, kill, logger, notifier):
         self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
+        self._notifier = notifier
         # One-shot latch: on 2026-07-06 the feed-breaker path re-flattened
         # every ~5s for 15+ minutes, spamming logs and burning API budget
         # (contributing to the Finnhub 429s). Latched after a clean flatten;
@@ -63,6 +64,10 @@ class IntradayRiskEngine:
                              "broker refused order (duplicate/existing/qty=0)")
             return
         self._flattened_latch = False   # new position -> flatten may act again
+        self._notifier.notify_entry(
+            ticker=signal.ticker, shares=shares, price=q.price,
+            system=System.INTRADAY.value, source=signal.source.value
+        )
         self._log.record(signal, System.INTRADAY, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
@@ -90,8 +95,20 @@ class IntradayRiskEngine:
                 # the whole cycle. sell() now handles 404 as already-flat; any
                 # genuine failure is contained and retried next cycle.
                 try:
-                    self._log.record_close(System.INTRADAY,
-                                           self._broker.sell(ticker, q.price))
+                    exit_price = q.price
+                    entry_price = pos.entry_price
+                    shares = pos.shares
+                    realized = self._broker.sell(ticker, exit_price)
+                    self._log.record_close(System.INTRADAY, realized)
+                    if exit_price is not None and realized is not None:
+                        self._notifier.notify_exit(
+                            ticker=ticker,
+                            shares=shares,
+                            exit_price=exit_price,
+                            entry_price=entry_price,
+                            pnl=realized,
+                            system=System.INTRADAY.value
+                        )
                 except Exception as e:  # noqa: BLE001
                     log.error("stop-exit %s failed (will retry next cycle): %s",
                               ticker, e)
@@ -121,8 +138,19 @@ class IntradayRiskEngine:
                 continue
             price = q.price if q else pos.entry_price
             try:
-                self._log.record_close(System.INTRADAY,
-                                       self._broker.sell(ticker, price))
+                entry_price = pos.entry_price
+                shares = pos.shares
+                realized = self._broker.sell(ticker, price)
+                self._log.record_close(System.INTRADAY, realized)
+                if price is not None and realized is not None:
+                    self._notifier.notify_exit(
+                        ticker=ticker,
+                        shares=shares,
+                        exit_price=price,
+                        entry_price=entry_price,
+                        pnl=realized,
+                        system=System.INTRADAY.value
+                    )
             except Exception as e:  # noqa: BLE001
                 log.error("flatten %s failed (%s): %s", ticker, reason, e)
                 failed.append(ticker)

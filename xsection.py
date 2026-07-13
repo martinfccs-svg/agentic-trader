@@ -53,8 +53,9 @@ XSECT_MIN_RANKABLE = int(os.getenv("XSECT_MIN_RANKABLE", "0"))
 
 
 class CrossSectionalMomentumEngine:
-    def __init__(self, feed, broker, kill, logger, universe):
+    def __init__(self, feed, broker, kill, logger, notifier, universe):
         self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
+        self._notifier = notifier
         self._universe = universe
         self._gate = DailyRebalanceGate()   # 10:00 ET; XSECT_REBALANCE_ET to change
 
@@ -159,8 +160,19 @@ class CrossSectionalMomentumEngine:
                 continue
             price = q.price if q and q.price else pos.entry_price
             try:
-                self._log.record_close(System.XSECTMOM,
-                                       self._broker.sell(ticker, price))
+                entry_price = pos.entry_price
+                shares = pos.shares
+                realized = self._broker.sell(ticker, price)
+                self._log.record_close(System.XSECTMOM, realized)
+                if price is not None and realized is not None:
+                    self._notifier.notify_exit(
+                        ticker=ticker,
+                        shares=shares,
+                        exit_price=price,
+                        entry_price=entry_price,
+                        pnl=realized,
+                        system=System.XSECTMOM.value
+                    )
                 log.warning("xsect rebalance: EXIT %s (fell out of top%d)",
                             ticker, XSECT.top_n)
             except Exception as e:  # noqa: BLE001 — one exit must not block the rest
@@ -188,6 +200,10 @@ class CrossSectionalMomentumEngine:
                 log.warning("xsect rebalance: broker refused %s "
                             "(duplicate/existing) — skipped", ticker)
                 continue
+            self._notifier.notify_entry(
+                ticker=ticker, shares=shares, price=q.price,
+                system=System.XSECTMOM.value, source=SignalSource.REL_STRENGTH.value
+            )
             self._log.record(Signal(SignalSource.REL_STRENGTH, ticker,
                                     reason="top-N relative strength"),
                              System.XSECTMOM, Action.OPENED,
@@ -213,8 +229,20 @@ class CrossSectionalMomentumEngine:
             self._broker.mark(ticker, q.price)
             if q.price <= pos.stop_price:
                 try:
-                    self._log.record_close(System.XSECTMOM,
-                                           self._broker.sell(ticker, q.price))
+                    exit_price = q.price
+                    entry_price = pos.entry_price
+                    shares = pos.shares
+                    realized = self._broker.sell(ticker, exit_price)
+                    self._log.record_close(System.XSECTMOM, realized)
+                    if exit_price is not None and realized is not None:
+                        self._notifier.notify_exit(
+                            ticker=ticker,
+                            shares=shares,
+                            exit_price=exit_price,
+                            entry_price=entry_price,
+                            pnl=realized,
+                            system=System.XSECTMOM.value
+                        )
                 except Exception as e:  # noqa: BLE001
                     log.error("xsect stop-exit %s failed (will retry next "
                               "cycle): %s", ticker, e)
