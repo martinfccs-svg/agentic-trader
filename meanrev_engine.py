@@ -19,8 +19,9 @@ log = logging.getLogger("meanrev")
 
 
 class MeanReversionEngine:
-    def __init__(self, feed, broker, kill, logger):
+    def __init__(self, feed, broker, kill, logger, notifier):
         self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
+        self._notifier = notifier
 
     def _open(self):
         return sum(1 for p in self._broker.positions.values() if p.system is System.MEANREV)
@@ -40,6 +41,10 @@ class MeanReversionEngine:
         if shares <= 0:
             self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK, "size=0"); return
         self._broker.buy(signal.ticker, shares, q.price, System.MEANREV, signal.source, stop)
+        self._notifier.notify_entry(
+            ticker=signal.ticker, shares=shares, price=q.price,
+            system=System.MEANREV.value, source=signal.source.value
+        )
         self._log.record(signal, System.MEANREV, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
@@ -56,4 +61,17 @@ class MeanReversionEngine:
             r = rsi(bars.close, MEANREV.rsi_period) if bars else None
             # Exit when reverted to the mean (RSI recovered) OR protective stop hit.
             if (r is not None and r >= MEANREV.rsi_exit) or q.price <= pos.stop_price:
-                self._log.record_close(System.MEANREV, self._broker.sell(ticker, q.price))
+                exit_price = q.price
+                entry_price = pos.entry_price
+                shares = pos.shares
+                realized = self._broker.sell(ticker, exit_price)
+                self._log.record_close(System.MEANREV, realized)
+                if exit_price is not None and realized is not None:
+                    self._notifier.notify_exit(
+                        ticker=ticker,
+                        shares=shares,
+                        exit_price=exit_price,
+                        entry_price=entry_price,
+                        pnl=realized,
+                        system=System.MEANREV.value
+                    )
