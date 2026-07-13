@@ -11,11 +11,29 @@ log = logging.getLogger("notifier")
 
 
 class Notifier:
-    """Send trade notifications via ntfy.sh."""
+    """Send trade notifications via ntfy.sh.
+    
+    NTFY can be configured as:
+    1. Access token (recommended): tk_yea79rev1okf84jxr8tjsgo2hjlno
+       - Sends to: https://ntfy.sh/tk_yea79rev1okf84jxr8tjsgo2hjlno
+    2. Full topic URL: https://ntfy.sh/mytopic
+       - Uses URL directly
+    """
 
     def __init__(self) -> None:
-        self.topic = os.environ.get("NTFY", "").strip()
-        self.enabled = bool(self.topic)
+        ntfy_value = os.environ.get("NTFY", "").strip()
+        self.enabled = bool(ntfy_value)
+        
+        if ntfy_value.startswith("tk_"):
+            # Token format: convert to full URL
+            self.topic = f"https://ntfy.sh/{ntfy_value}"
+        elif ntfy_value.startswith("http"):
+            # Already a full URL
+            self.topic = ntfy_value
+        else:
+            # Invalid or empty
+            self.enabled = False
+            self.topic = None
 
     def notify_entry(self, ticker: str, shares: float, price: float, system: str, source: str = "") -> None:
         """Send notification for trade entry."""
@@ -44,3 +62,4 @@ class Notifier:
             requests.post(self.topic, data=message, headers=headers, timeout=3)
         except Exception as e:
             log.warning("ntfy notification error: %s", e)
+
