@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional, Protocol
@@ -133,6 +134,34 @@ def _alpaca_error_code(err) -> Optional[int]:
         if str(known) in msg:
             return known
     return None
+
+
+# Systems whose bracket carries a take-profit leg by DEFAULT. xsectmom is
+# excluded: a relative-strength book should ride winners until they rotate
+# out of rank, not cap them at a fixed R. Any system can be flipped with the
+# env var <SYSTEM>_USE_TAKE_PROFIT = true/false (e.g. XSECT_USE_TAKE_PROFIT=true
+# to restore the old behavior, or SWING_USE_TAKE_PROFIT=false to try it off).
+_TAKE_PROFIT_DEFAULT = {
+    "swing": True,
+    "meanrev": True,      # mean-reversion explicitly wants a target
+    "xsectmom": False,    # ride the trend; exit on rotation or stop
+    "intraday": True,
+}
+
+
+def _use_take_profit(system) -> bool:
+    """Whether this system's entries attach a take-profit leg. Env override
+    key is per-system, tolerant of the XSECT/xsectmom naming: e.g.
+    XSECT_USE_TAKE_PROFIT or XSECTMOM_USE_TAKE_PROFIT."""
+    name = system.value
+    aliases = {name.upper()}
+    if name == "xsectmom":
+        aliases.add("XSECT")
+    for a in aliases:
+        raw = os.getenv(f"{a}_USE_TAKE_PROFIT")
+        if raw is not None:
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+    return _TAKE_PROFIT_DEFAULT.get(name, True)
 
 
 class AlpacaBroker:
@@ -269,20 +298,46 @@ class AlpacaBroker:
         if USE_BRACKET_ORDERS:
             # Marketable LIMIT entry: cap the worst fill we'll accept (slippage guard).
             limit = round(price * (1 + MAX_SLIPPAGE_BPS / 10_000.0), 2)
-            # Broker-side protective stop + target. These live on Alpaca, so they
-            # trigger even if this bot is down -- the stop no longer dies with us.
             risk_per_share = max(price - stop_price, 0.01)
-            target = round(price + TAKE_PROFIT_R * risk_per_share, 2)
-            order = LimitOrderRequest(
-                symbol=ticker, qty=qty, side=OrderSide.BUY,
-                time_in_force=tif, limit_price=limit,
-                order_class=OrderClass.BRACKET,
-                stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
-                take_profit=TakeProfitRequest(limit_price=target),
-                client_order_id=coid,
-            )
-            log.warning("[ALPACA] BRACKET BUY %s x%d limit<=%.2f stop=%.2f target=%.2f [%s] coid=%s",
-                        ticker, qty, limit, stop_price, target, system.value, coid)
+
+            # --- Take-profit leg: optional, per-system (2026-07-14) ----------
+            # xsectmom is a relative-strength strategy: its edge is HOLDING the
+            # strongest names until they fall out of the top-3 rank, capturing
+            # the long right tail of a trend. A 2R take-profit leg amputates
+            # exactly that tail — three rotations running (Jul 10/13/14) it
+            # sold the winners by midday and left the momentum book in cash on
+            # rising tape. Momentum books should exit on rank rotation or the
+            # protective stop, NOT a fixed profit target. Swing/meanrev keep
+            # their targets (mean-reversion in particular WANTS a target).
+            # Override per system via XSECT_USE_TAKE_PROFIT / <SYS>_USE_TAKE_PROFIT.
+            use_tp = _use_take_profit(system)
+            if use_tp:
+                target = round(price + TAKE_PROFIT_R * risk_per_share, 2)
+                order = LimitOrderRequest(
+                    symbol=ticker, qty=qty, side=OrderSide.BUY,
+                    time_in_force=tif, limit_price=limit,
+                    order_class=OrderClass.BRACKET,
+                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+                    take_profit=TakeProfitRequest(limit_price=target),
+                    client_order_id=coid,
+                )
+                log.warning("[ALPACA] BRACKET BUY %s x%d limit<=%.2f stop=%.2f "
+                            "target=%.2f [%s] coid=%s", ticker, qty, limit,
+                            stop_price, target, system.value, coid)
+            else:
+                # Stop-only: OTO (one-triggers-one) — entry triggers a single
+                # protective stop leg, no profit target. The position is
+                # exited by the strategy engine (rank rotation) or the stop.
+                order = LimitOrderRequest(
+                    symbol=ticker, qty=qty, side=OrderSide.BUY,
+                    time_in_force=tif, limit_price=limit,
+                    order_class=OrderClass.OTO,
+                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+                    client_order_id=coid,
+                )
+                log.warning("[ALPACA] OTO BUY (stop-only, no target) %s x%d "
+                            "limit<=%.2f stop=%.2f [%s] coid=%s", ticker, qty,
+                            limit, stop_price, system.value, coid)
         else:
             order = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY,
                                        time_in_force=tif,
