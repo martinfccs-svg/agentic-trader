@@ -221,15 +221,47 @@ class FinnhubFeed(_HealthMixin):
             raw = self._call("quote", ticker)
             if not raw or "c" not in raw:
                 return None
-            # Cached bars: get_intraday/get_daily reuse the per-cycle memo.
-            bars = self.get_intraday_bars(ticker) or self.get_daily_bars(ticker)
+            # ---------------------------------------------------------------
+            # SCALE CONTRACT (fixed 2026-07-15 — the whipsaw bug).
+            # This previously computed EVERY field from `intraday or daily`
+            # bars, so on any ticker with 1-min bars the quote reported
+            # 1-MINUTE-scale risk. q.atr is what every engine turns into a
+            # stop: `stop = price - N * q.atr`. A 3x "ATR stop" meant to be a
+            # ~6% multi-day cushion became a ~1% hair-trigger — on 2026-07-15
+            # xsectmom's three entries stopped out in under 11 minutes
+            # (MU/INTC/ARM, -$342) at exactly entry - 3 x (1-min ATR).
+            # Worse: a ~1% stop makes risk-based sizing explode, so the 10%
+            # notional cap bound every trade and the 1% risk-per-trade rule
+            # never applied (actual risk/trade was ~$80-130, not ~$975).
+            # Same unit-mismatch class as the avg_dollar_volume bug fixed on
+            # Jul 9 — same function, different field.
+            #
+            # The contract is now EXPLICIT:
+            #   atr, avg_dollar_volume, sma  -> DAILY bars (risk & liquidity
+            #       scale; consumed by swing / meanrev / xsectmom sizing+stops)
+            #   vwap, rel_volume             -> INTRADAY bars (they are
+            #       intraday concepts; daily scanners compute their own from
+            #       daily bars anyway)
+            # A system that wants intraday-scale risk (the intraday engine)
+            # computes it from get_intraday_bars() itself, explicitly.
+            # ---------------------------------------------------------------
+            daily = self.get_daily_bars(ticker)
+            intra = self.get_intraday_bars(ticker)
+            if daily is None and intra is None:
+                return None
+            risk_bars = daily if daily is not None else intra
+            if daily is None:
+                log.warning("quote %s: no daily bars — falling back to "
+                            "intraday for ATR/liquidity scale. Stops on this "
+                            "name will be far too tight; treat as degraded.",
+                            ticker)
             return Quote(
                 ticker=ticker, price=raw["c"],
-                atr=atr(bars) if bars else None,
-                vwap=vwap(bars) if bars else None,
-                rel_volume=relative_volume(bars) if bars else None,
-                avg_dollar_volume=avg_dollar_volume(bars) if bars else None,
-                sma=sma(bars.close, 10) if bars else None,
+                atr=atr(risk_bars) if risk_bars else None,
+                vwap=vwap(intra) if intra else None,
+                rel_volume=relative_volume(intra) if intra else None,
+                avg_dollar_volume=avg_dollar_volume(risk_bars) if risk_bars else None,
+                sma=sma(risk_bars.close, 10) if risk_bars else None,
             )
         return self._memo(("quote", ticker), fetch)
 
@@ -264,10 +296,17 @@ class SimulatedFeed(_HealthMixin):
     def new_cycle(self): pass        # local data; nothing to cache/clear
 
     def get_quote(self, ticker):
-        bars = self._intraday[ticker]
-        return Quote(ticker, price=bars.close[-1], volume=bars.volume[-1],
-                     atr=atr(bars), vwap=vwap(bars), rel_volume=relative_volume(bars),
-                     avg_dollar_volume=avg_dollar_volume(bars), sma=sma(bars.close, 10))
+        # Mirror FinnhubFeed's scale contract: risk/liquidity fields from
+        # DAILY bars, vwap/rel_volume from intraday. See the note in
+        # FinnhubFeed.get_quote — a simulated feed that reports 1-min-scale
+        # ATR would hide the very bug that cost real money on 2026-07-15.
+        daily = self._daily[ticker]
+        intra = self._intraday[ticker]
+        return Quote(ticker, price=intra.close[-1], volume=intra.volume[-1],
+                     atr=atr(daily), vwap=vwap(intra),
+                     rel_volume=relative_volume(intra),
+                     avg_dollar_volume=avg_dollar_volume(daily),
+                     sma=sma(daily.close, 10))
 
     def step_prices(self):
         for store in (self._daily, self._intraday):
