@@ -791,9 +791,29 @@ class AlpacaBroker:
             if stop is None and reg and reg.get("stop_price"):
                 stop = float(reg["stop_price"])
             if stop is None:
-                stop = round(entry * 0.99, 2)
-                log.warning("[ALPACA] reconcile: %s has no discoverable stop "
-                            "— defaulting to 1%% under entry", ticker)
+                # NEVER invent a triggerable stop (2026-07-16 incident).
+                # This used to default to entry * 0.99. On the first boot with
+                # a cold registry and an order scan that found no stop legs,
+                # that put an invented stop ABOVE the live price for every
+                # position already >1% underwater — so the first manage cycle
+                # read price <= stop and liquidated them. UNH (real stop
+                # 405.14, price 423.38) was sold at -279.62; INTC at -99.24;
+                # MU at -41.76. Three positions killed at losses their
+                # strategies never sanctioned, after hours, on stale quotes.
+                #
+                # 0.0 is unreachable: the position can never be stopped out by
+                # a number this code made up. Swing/meanrev re-derive a real
+                # trailing stop from daily ATR on the first manage cycle
+                # (max(stop, high_water - MULT*atr)); xsectmom relies on its
+                # broker-side GTC leg. If neither exists the position is
+                # genuinely unprotected — hence CRITICAL, not a warning.
+                stop = 0.0
+                log.critical("[ALPACA] reconcile: %s adopted with NO known "
+                             "stop (registry cold AND no stop leg found). "
+                             "Stop set to 0.0 — deliberately unreachable so "
+                             "nothing invented can force an exit. The engine "
+                             "will re-derive from ATR next cycle; VERIFY a "
+                             "protective stop exists at the broker.", ticker)
             self.positions[ticker] = Position(
                 ticker, system, qty, entry, time.time(), stop, None,
                 entry_stop=stop, high_water=max(entry, last), last_price=last)
