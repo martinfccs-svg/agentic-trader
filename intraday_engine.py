@@ -11,7 +11,7 @@ import logging
 
 import audit
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
-from indicators import avg_dollar_volume
+from indicators import atr, avg_dollar_volume
 from models import Action, Signal, System
 from risk import position_size
 
@@ -19,9 +19,8 @@ log = logging.getLogger("intraday")
 
 
 class IntradayRiskEngine:
-    def __init__(self, feed, broker, kill, logger, notifier):
+    def __init__(self, feed, broker, kill, logger):
         self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
-        self._notifier = notifier
         # One-shot latch: on 2026-07-06 the feed-breaker path re-flattened
         # every ~5s for 15+ minutes, spamming logs and burning API budget
         # (contributing to the Finnhub 429s). Latched after a clean flatten;
@@ -39,18 +38,28 @@ class IntradayRiskEngine:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK)
             return
         q = self._feed.get_quote(signal.ticker)
-        if q is None or q.atr is None:
-            self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "no quote/atr")
+        if q is None:
+            self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "no quote")
             return
-        # Liquidity on DAILY dollar volume. q.avg_dollar_volume is computed from
-        # 1-min bars here, so comparing it to a daily threshold was ~390x too
-        # strict (the unit bug that was rejecting PLTR). Test daily bars instead.
+        # Liquidity on DAILY dollar volume. (As of 2026-07-15 the quote
+        # reports daily-scale liquidity by contract, but fetching daily bars
+        # here is explicit and costs nothing — they're cached.)
         daily = self._feed.get_daily_bars(signal.ticker)
         daily_dv = avg_dollar_volume(daily) if daily else None
         if q.price < MIN_PRICE or (daily_dv or 0) < MIN_DOLLAR_VOL:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_LIQUIDITY)
             return
-        stop = q.price - INTRADAY.atr_stop_multiple * q.atr
+        # INTRADAY-scale ATR, computed explicitly from 1-min bars. q.atr is
+        # now DAILY-scale by contract (see feed_layer.get_quote): using it
+        # here would make this engine's stop ~20x too wide for a strategy
+        # that flattens before the close. This engine is the one place that
+        # legitimately wants 1-minute risk scale, so it asks for it directly.
+        intra = self._feed.get_intraday_bars(signal.ticker)
+        intra_atr = atr(intra) if intra else None
+        if intra_atr is None:
+            self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "no intraday atr")
+            return
+        stop = q.price - INTRADAY.atr_stop_multiple * intra_atr
         shares = position_size(self._broker.equity, q.price, stop, getattr(self._broker, "cash", 1e12))
         if shares <= 0:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "size=0")
@@ -64,10 +73,6 @@ class IntradayRiskEngine:
                              "broker refused order (duplicate/existing/qty=0)")
             return
         self._flattened_latch = False   # new position -> flatten may act again
-        self._notifier.notify_entry(
-            ticker=signal.ticker, shares=shares, price=q.price,
-            system=System.INTRADAY.value, source=signal.source.value
-        )
         self._log.record(signal, System.INTRADAY, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
@@ -95,20 +100,8 @@ class IntradayRiskEngine:
                 # the whole cycle. sell() now handles 404 as already-flat; any
                 # genuine failure is contained and retried next cycle.
                 try:
-                    exit_price = q.price
-                    entry_price = pos.entry_price
-                    shares = pos.shares
-                    realized = self._broker.sell(ticker, exit_price)
-                    self._log.record_close(System.INTRADAY, realized)
-                    if exit_price is not None and realized is not None:
-                        self._notifier.notify_exit(
-                            ticker=ticker,
-                            shares=shares,
-                            exit_price=exit_price,
-                            entry_price=entry_price,
-                            pnl=realized,
-                            system=System.INTRADAY.value
-                        )
+                    self._log.record_close(System.INTRADAY,
+                                           self._broker.sell(ticker, q.price))
                 except Exception as e:  # noqa: BLE001
                     log.error("stop-exit %s failed (will retry next cycle): %s",
                               ticker, e)
@@ -138,19 +131,8 @@ class IntradayRiskEngine:
                 continue
             price = q.price if q else pos.entry_price
             try:
-                entry_price = pos.entry_price
-                shares = pos.shares
-                realized = self._broker.sell(ticker, price)
-                self._log.record_close(System.INTRADAY, realized)
-                if price is not None and realized is not None:
-                    self._notifier.notify_exit(
-                        ticker=ticker,
-                        shares=shares,
-                        exit_price=price,
-                        entry_price=entry_price,
-                        pnl=realized,
-                        system=System.INTRADAY.value
-                    )
+                self._log.record_close(System.INTRADAY,
+                                       self._broker.sell(ticker, price))
             except Exception as e:  # noqa: BLE001
                 log.error("flatten %s failed (%s): %s", ticker, reason, e)
                 failed.append(ticker)
