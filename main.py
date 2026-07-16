@@ -27,7 +27,6 @@ from feed_layer import SimulatedFeed, build_feed
 from intraday_engine import IntradayRiskEngine
 from kill_switch import KillSwitch
 from models import System
-from notifier import Notifier
 from router import SignalRouter
 from safety import market_is_open, near_close, startup_banner
 from scanner import PriceActionScanner
@@ -66,16 +65,15 @@ def build():
     recorder = TradeRecorder()          # writes trades.jsonl for Monte Carlo
     broker = build_broker(recorder=recorder)
     logger = TradeLogger()
-    notifier = Notifier()
     kill = KillSwitch(feed, broker)
 
-    swing = SwingRiskEngine(feed, broker, kill, logger, notifier) \
+    swing = SwingRiskEngine(feed, broker, kill, logger) \
         if "swing" in ENABLED_SYSTEMS else None
-    intraday = IntradayRiskEngine(feed, broker, kill, logger, notifier) \
+    intraday = IntradayRiskEngine(feed, broker, kill, logger) \
         if "intraday" in ENABLED_SYSTEMS else None
-    meanrev = MeanReversionEngine(feed, broker, kill, logger, notifier) \
+    meanrev = MeanReversionEngine(feed, broker, kill, logger) \
         if "meanrev" in ENABLED_SYSTEMS else None
-    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, notifier, UNIVERSE) \
+    xsect = CrossSectionalMomentumEngine(feed, broker, kill, logger, UNIVERSE) \
         if "xsectmom" in ENABLED_SYSTEMS else None
 
     if intraday is not None:
@@ -113,8 +111,27 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
         if (intraday and is_open and not near_close()) else []
     log.info("scan: %d trend, %d meanrev, %d intraday (market_open=%s)",
              len(swing_sigs), len(meanrev_sigs), len(intraday_sigs), is_open)
-    for sig in swing_sigs + meanrev_sigs + intraday_sigs:
-        router.route(sig)
+
+    # Route to engines ONLY while the market is open (2026-07-16 fix).
+    # Previously only intraday's SCAN was hours-gated; swing/meanrev signals
+    # routed around the clock. At 16:27 ET the post-close daily-bar refresh
+    # revealed today's completed bar, produced two genuine breakouts, and the
+    # bot fired GTC brackets into a CLOSED market (PLD, UNP). Those orders sit
+    # until the next open and then fill against stops computed from stale
+    # prices — a gap below the stop means an instant stop-out on a position
+    # held for zero seconds. Swing/meanrev signals are end-of-day facts; the
+    # correct response is to act at the next open, re-derived from live prices.
+    #
+    # Scans still run while closed on purpose: the funnels are useful
+    # observability (they show what WOULD signal), and daily bars are cached
+    # so the scan costs almost nothing.
+    if is_open:
+        for sig in swing_sigs + meanrev_sigs + intraday_sigs:
+            router.route(sig)
+    elif swing_sigs or meanrev_sigs:
+        log.info("market closed — %d signal(s) held, NOT routed. They are "
+                 "re-derived from live prices at the next open.",
+                 len(swing_sigs) + len(meanrev_sigs))
 
     # Cross-sectional momentum rebalances on its own cadence (not per signal).
     if xsect:
