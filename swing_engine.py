@@ -11,6 +11,7 @@ import logging
 from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
 from models import Action, Signal, System
 from risk import position_size
+from safety import market_is_open
 
 log = logging.getLogger("swing")
 
@@ -100,7 +101,12 @@ class SwingRiskEngine:
                 pos.stop_price = max(
                     pos.stop_price,
                     pos.high_water - SWING.atr_stop_multiple * q.atr)
-            if q.price <= pos.stop_price:
+            # Local stop is a BACKUP to the broker-side GTC leg, which is
+            # live 24/7. Firing it while the market is CLOSED just sells at a
+            # stale quote — on 2026-07-16 that dumped UNH/INTC/MU at
+            # "quote-est" prices 30 min after the bell. If a stop is genuinely
+            # hit during the session, the broker's own leg fills it.
+            if q.price <= pos.stop_price and market_is_open():
                 try:
                     exit_price = q.price
                     entry_price = pos.entry_price
