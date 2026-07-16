@@ -120,6 +120,14 @@ class PaperBroker:
 # ============================ ALPACA (real) ==============================
 
 # Alpaca error codes observed in the 2026-07-06 incident
+# Reconciliation timing guards (2026-07-16 phantom-close incident).
+# A tracked position absent from the broker's positions API is only treated
+# as "closed by a leg" once BOTH hold: the entry is old enough that a
+# settlement lag is implausible, and the absence has persisted across
+# several cycles. Anything faster is the broker not having caught up yet.
+_ENTRY_SETTLE_GRACE_SECS = float(os.getenv("ENTRY_SETTLE_GRACE_SECS", "90"))
+_ABSENT_CONFIRM_SECS = float(os.getenv("ABSENT_CONFIRM_SECS", "60"))
+
 _POSITION_NOT_FOUND = 40410000   # 404: position not found
 _INSUFFICIENT_QTY = 40310000     # 403: qty held for open (bracket) orders
 
@@ -186,6 +194,9 @@ class AlpacaBroker:
         # Entry orders whose actual fill hasn't been confirmed yet:
         # ticker -> entry order id. Drained by refresh_entry_fills().
         self._pending_entry_fills: dict[str, str] = {}
+        # ticker -> epoch when first seen missing from the broker (see the
+        # reconciliation guards; reset the moment it reappears)
+        self._absent_since: dict[str, float] = {}
         # trade_logger.print_scorecard reads broker.start_equity; its absence
         # crashed the shutdown path on 2026-07-06 (AttributeError).
         try:
@@ -488,10 +499,19 @@ class AlpacaBroker:
             time.sleep(0.3)
         return None
 
-    def _find_closing_fill_price(self, ticker):
+    def _find_closing_fill_price(self, ticker, after_ts: float | None = None):
         """Find the actual fill price of the most recent filled SELL order
         for a ticker — i.e. the bracket leg that closed the position
-        broker-side. Returns None if not found."""
+        broker-side. Returns None if not found.
+
+        `after_ts` (epoch seconds) is REQUIRED in practice: without it this
+        scan returns the newest closed sell order regardless of age. On
+        2026-07-16 that booked THREE phantom closes against the previous
+        DAY's exits (MU at 943.24 — yesterday's fill price, while MU was
+        actually trading at 847) and invented +$742.62 of profit that never
+        existed. A closing fill that predates the entry cannot possibly have
+        closed it.
+        """
         from alpaca.trading.enums import OrderSide, QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
         try:
@@ -501,13 +521,26 @@ class AlpacaBroker:
         except Exception as e:  # noqa: BLE001
             log.warning("[ALPACA] closed-order lookup %s: %s", ticker, e)
             return None
+        cutoff = None
+        if after_ts is not None:
+            cutoff = datetime.fromtimestamp(after_ts, tz=timezone.utc)
         best = None
         for o in orders:
-            if not str(getattr(o, "status", "")).lower().endswith("filled"):
+            if not self._is_fully_filled(o):
                 continue
             fap = getattr(o, "filled_avg_price", None)
             fat = getattr(o, "filled_at", None)
-            if fap and (best is None or (fat and best[0] and fat > best[0])):
+            if not fap:
+                continue
+            if cutoff is not None:
+                if fat is None:
+                    continue            # undatable: cannot prove it's ours
+                try:
+                    if fat <= cutoff:
+                        continue        # predates the entry — not our exit
+                except TypeError:
+                    continue            # unparseable timestamp: skip, be safe
+            if best is None or (fat and best[0] and fat > best[0]):
                 best = (fat, float(fap))
         return best[1] if best else None
 
@@ -540,16 +573,45 @@ class AlpacaBroker:
             return out
         for ticker in candidates:
             if ticker in broker_syms:
+                self._absent_since.pop(ticker, None)   # present: reset
                 continue
             pos = self.positions.get(ticker)
             if pos is None:
                 continue
-            fill = self._find_closing_fill_price(ticker)
+
+            # ---- GUARD 1: entry not confirmed filled -------------------
+            # A position booked at quote-est whose entry order is still
+            # working is not AT the broker yet. Absence proves nothing.
+            if ticker in self._pending_entry_fills:
+                continue
+
+            # ---- GUARD 2: settlement grace ------------------------------
+            # Even after an entry fills, the position can lag the positions
+            # API by seconds. On 2026-07-16 this window (ONE cycle, 0.74s
+            # after entry for INTC) was read as "the leg closed it" and
+            # three live positions were deleted from the tracker while the
+            # account actually held them — the bot went blind to ~$9.6k of
+            # real risk and reported +$742.62 of profit that did not exist.
+            absent_for = time.time() - self._absent_since.setdefault(
+                ticker, time.time())
+            age = time.time() - pos.entry_time
+            if age < _ENTRY_SETTLE_GRACE_SECS or absent_for < _ABSENT_CONFIRM_SECS:
+                continue
+
+            # ---- GUARD 3: prove the close, never invent it --------------
+            # The closing fill must POSTDATE the entry. If we cannot prove
+            # a close, we do NOT book one: an unprovable close was exactly
+            # the 2026-07-16 fabrication. Keep the position, shout, retry.
+            fill = self._find_closing_fill_price(ticker, after_ts=pos.entry_time)
             if fill is None:
-                fill = pos.last_price or pos.entry_price
-                log.warning("[ALPACA] RECONCILE %s: leg fill not found — "
-                            "booking at last mark %.2f (estimate)",
-                            ticker, fill)
+                log.critical("[ALPACA] %s: absent from broker for %.0fs but NO "
+                             "post-entry closing fill found. NOT booking a "
+                             "close (an unprovable close is how phantom P&L "
+                             "gets invented). Position kept; verify manually "
+                             "if this persists.", ticker, absent_for)
+                continue
+
+            self._absent_since.pop(ticker, None)
             self.positions.pop(ticker, None)
             self._save_position_state()
             realized = (fill - pos.entry_price) * pos.shares
