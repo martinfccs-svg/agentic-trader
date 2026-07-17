@@ -237,6 +237,33 @@ class CrossSectionalMomentumEngine:
             if q is None:
                 continue
             self._broker.mark(ticker, q.price)
+            # Self-heal a missing stop (2026-07-16). reconcile now adopts
+            # with stop=0.0 when it cannot discover one — deliberately
+            # unreachable, so nothing invented can force an exit. But this
+            # engine has NO trailing logic to re-derive one (swing does), so
+            # the position would sit with no local stop indefinitely. Worse:
+            # the sell path CANCELS the broker leg before selling, so a sell
+            # that fails (e.g. submitted after hours) leaves no broker stop
+            # either — exactly the state UNH/INTC/MU were left in.
+            #
+            # Re-derive the position's ORIGINAL intent: entry - MULT x daily
+            # ATR. On MU that reconstructs 612.84 against a real designed stop
+            # of 612.10. If ATR has collapsed since entry so that the
+            # entry-anchored stop sits AT OR ABOVE the live price, anchor to
+            # price instead — a stop above the market is the Jul 16 bug.
+            if not pos.stop_price and q.atr:
+                derived = pos.entry_price - XSECT.atr_stop_multiple * q.atr
+                if derived >= q.price:
+                    derived = q.price - XSECT.atr_stop_multiple * q.atr
+                pos.stop_price = derived
+                if not pos.entry_stop:
+                    pos.entry_stop = derived
+                log.critical("xsect: %s had NO stop — re-derived %.2f "
+                             "(entry %.2f - %.1f x daily ATR %.2f). LOCAL "
+                             "stop only: verify a broker-side GTC stop "
+                             "exists, this one dies with the process.",
+                             ticker, derived, pos.entry_price,
+                             XSECT.atr_stop_multiple, q.atr)
             # Local stop is a BACKUP to the broker-side GTC leg, which is
             # live 24/7. Firing it while the market is CLOSED just sells at a
             # stale quote — on 2026-07-16 that dumped UNH/INTC/MU at
