@@ -132,6 +132,20 @@ _POSITION_NOT_FOUND = 40410000   # 404: position not found
 _INSUFFICIENT_QTY = 40310000     # 403: qty held for open (bracket) orders
 
 
+def _walk_order(order):
+    """Yield an order and every nested child leg, recursively.
+
+    Alpaca's GetOrdersRequest(nested=True) rolls multi-leg orders up under the
+    parent's `legs` field rather than listing children at top level. Any scan
+    that iterates only the returned list therefore never sees a bracket/OTO
+    protective stop — the parent is the entry (stop_price=None) and the stop
+    is a child. Cost us every "no discoverable stop" warning of 2026-07-16.
+    """
+    yield order
+    for leg in (getattr(order, "legs", None) or []):
+        yield from _walk_order(leg)
+
+
 def _alpaca_error_code(err) -> Optional[int]:
     """Extract Alpaca's numeric error code from an APIError, defensively."""
     code = getattr(err, "code", None)
@@ -746,10 +760,21 @@ class AlpacaBroker:
                         # of the Jul-10 swing order, poisoned the registry,
                         # and boot-looped the service all weekend.
                         sys_by_ticker.setdefault(o.symbol, system)
-            sp = getattr(o, "stop_price", None)
-            status = str(getattr(o, "status", "")).lower()
-            if sp and ("new" in status or "held" in status or "accepted" in status):
-                stop_by_ticker[o.symbol] = float(sp)
+            # ---- walk the parent AND its nested legs (2026-07-17 fix) -------
+            # nested=True rolls bracket/OTO child legs up UNDER the parent's
+            # `legs` field instead of returning them as top-level orders. The
+            # loop therefore only ever saw PARENTS — and a parent is the limit
+            # BUY, whose stop_price is None. The protective stop lives in the
+            # leg. Result: stop_by_ticker was EMPTY on every boot since the
+            # registry shipped, so every position logged "no discoverable
+            # stop" even when its GTC leg was alive and well at Alpaca (ARM,
+            # 2026-07-16). Walk the legs.
+            for node in _walk_order(o):
+                sp = getattr(node, "stop_price", None)
+                status = str(getattr(node, "status", "")).lower()
+                if sp and ("new" in status or "held" in status
+                           or "accepted" in status):
+                    stop_by_ticker[node.symbol] = float(sp)
 
         registry = self._load_position_state()
 
