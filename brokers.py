@@ -312,12 +312,53 @@ class AlpacaBroker:
         # intraday book (flat by the close anyway) should use DAY.
         tif = TimeInForce.DAY if system is System.INTRADAY else TimeInForce.GTC
 
+        # --- Duplicate guard #1b: is a BUY already WORKING at the broker? ---
+        # A position check is NOT enough. An entry order that has not filled
+        # leaves no position, so a restart re-signals the same name and fires
+        # a second order. That is precisely how PLD stacked 2x and UNP 3x on
+        # 2026-07-17 across five redeploys. If we cannot verify, we do NOT
+        # trade: a missed entry is cheap, a duplicate is not.
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+            working = self._client.get_orders(GetOrdersRequest(
+                status=QueryOrderStatus.OPEN, symbols=[ticker])) or []
+        except Exception as e:  # noqa: BLE001
+            log.error("[ALPACA] refusing %s: cannot verify working orders "
+                      "(%s). Not trading on an unverified book.", ticker, e)
+            return None
+        for o in working:
+            side = str(getattr(o, "side", "")).lower()
+            if "buy" in side:
+                log.warning("[ALPACA] refusing %s: a BUY is already working "
+                            "at the broker (id=%s status=%s). An unfilled "
+                            "entry leaves no position — this is the guard "
+                            "that PLD/UNP needed on 2026-07-17.",
+                            ticker, getattr(o, "id", "?"),
+                            getattr(o, "status", "?"))
+                return None
+
         # --- Duplicate guard #2: deterministic client_order_id. -------------
-        # Same (system, ticker, minute) after a restart hashes to the same id,
-        # so Alpaca rejects the re-fired order instead of filling it again.
-        minute = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        # Idempotency WINDOW matters more than the hash. This used to key on
+        # the MINUTE, so it only ever blocked a re-fire inside the same 60s —
+        # useless against restarts minutes or hours apart. On 2026-07-16/17
+        # five redeploys each re-signalled PLD/UNP (whose entries were still
+        # working, so no position existed to trip guard #1) and every order
+        # got a fresh coid: PLD filled 2x (130 sh vs 65) and UNP 3x (96 sh vs
+        # 32) — ~50% of equity in two names against a 10% cap.
+        #
+        # The multi-day systems trade a name at most once per day by design
+        # (xsect rotates once at 10:00 ET; swing holds for days), so key on
+        # the DATE: Alpaca then rejects the second entry for that ticker/
+        # system/day server-side, no matter how many times we restart.
+        # Intraday legitimately re-enters the same name within a session, so
+        # it keeps the minute window.
+        if system is System.INTRADAY:
+            window = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        else:
+            window = datetime.now(timezone.utc).strftime("%Y%m%d")
         coid = (f"bot-{system.value}-"
-                + hashlib.sha256(f"{system.value}:{ticker}:{minute}".encode())
+                + hashlib.sha256(f"{system.value}:{ticker}:{window}".encode())
                 .hexdigest()[:16])
 
         if USE_BRACKET_ORDERS:
@@ -435,10 +476,37 @@ class AlpacaBroker:
                           "phantom position from the tracker", ticker, status)
                 self.positions.pop(ticker, None)
                 self._pending_entry_fills.pop(ticker, None)
+                self._save_position_state()
                 continue
-            if not (self._is_fully_filled(o)
-                    and getattr(o, "filled_avg_price", None)):
+
+            # ---- PARTIAL FILL: track what ACTUALLY filled (2026-07-17) -----
+            # A working limit can sit partially filled indefinitely (entries
+            # are GTC for multi-day systems). Previously this path just kept
+            # polling and left the position booked at the FULL requested size:
+            # AMD was logged as x9 while only 4 shares filled, so every P&L
+            # figure on it was inflated 2.25x and its stop was sized for 9
+            # against 4 held. Correct the tracked quantity as it fills.
+            filled_qty = float(getattr(o, "filled_qty", 0) or 0)
+            if not self._is_fully_filled(o):
+                if filled_qty > 0 and abs(filled_qty - pos.shares) > 1e-9:
+                    log.warning("[ALPACA] %s PARTIAL fill: tracking %.0f sh, "
+                                "broker filled %.0f — correcting the tracker "
+                                "to %.0f (order still working)",
+                                ticker, pos.shares, filled_qty, filled_qty)
+                    pos.shares = filled_qty
+                    fap = getattr(o, "filled_avg_price", None)
+                    if fap:
+                        pos.entry_price = float(fap)
+                    self._save_position_state()
                 continue                          # still working; retry next cycle
+
+            if not getattr(o, "filled_avg_price", None):
+                continue
+            if filled_qty > 0 and abs(filled_qty - pos.shares) > 1e-9:
+                log.warning("[ALPACA] %s final fill qty %.0f differs from "
+                            "tracked %.0f — correcting", ticker, filled_qty,
+                            pos.shares)
+                pos.shares = filled_qty
             fill = float(o.filled_avg_price)
             if abs(fill - pos.entry_price) > 0.005:
                 log.warning("[ALPACA] entry CORRECTED %s: quote-est %.4f -> "
