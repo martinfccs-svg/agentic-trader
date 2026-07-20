@@ -124,14 +124,22 @@ def _auth() -> dict:
 # ---------------------------------------------------------------------------
 
 def fetch_daily_bars(symbols: list[str], limit: int = 120) -> dict[str, list[dict]]:
-    """{sym: [{'t','o','h','l','c','v'}, ...]} oldest->newest, IEX/SIP daily."""
+    """{sym: [{'t','o','h','l','c','v'}, ...]} oldest->newest, daily bars.
+
+    `start` is REQUIRED: omitted, Alpaca defaults it to the current day and
+    returns ~1 bar per symbol — which killed all 63 names at the 60-bar
+    minimum on first deploy (2026-07-20, kills: insufficient_history=63).
+    250 calendar days ≈ 172 trading bars, comfortable headroom over the
+    120-bar window we keep."""
+    from datetime import timedelta, timezone as _tz
+    start = (datetime.now(_tz.utc) - timedelta(days=250)).strftime("%Y-%m-%d")
     out: dict[str, list[dict]] = {}
     for i in range(0, len(symbols), 50):
         chunk = symbols[i:i + 50]
         page = None
         while True:
             params = {"symbols": ",".join(chunk), "timeframe": "1Day",
-                      "limit": 10000, "adjustment": "split"}
+                      "start": start, "limit": 10000, "adjustment": "split"}
             if page:
                 params["page_token"] = page
             r = requests.get(f"{ALPACA_STOCK_DATA}/bars", params=params,
