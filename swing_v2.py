@@ -104,8 +104,19 @@ ALPACA_STOCK_DATA = "https://data.alpaca.markets/v2/stocks"
 
 
 def _auth() -> dict:
-    return {"APCA-API-KEY-ID": os.environ.get("APCA_API_KEY_ID", ""),
-            "APCA-API-SECRET-KEY": os.environ.get("APCA_API_SECRET_KEY", "")}
+    # Key naming: this codebase uses ALPACA_API_KEY / ALPACA_SECRET_KEY
+    # (see config.py / brokers.py). Alpaca's own SDK convention is
+    # APCA_API_KEY_ID / APCA_API_SECRET_KEY. Accept both, repo names first —
+    # reading only the APCA_* names 403'd every data fetch on first deploy
+    # (2026-07-20, caught by Railway's env suggestion).
+    key = os.environ.get("ALPACA_API_KEY") or os.environ.get("APCA_API_KEY_ID", "")
+    sec = (os.environ.get("ALPACA_SECRET_KEY")
+           or os.environ.get("APCA_API_SECRET_KEY", ""))
+    if not key or not sec:
+        log.error("swing_v2: no Alpaca keys found under ALPACA_* or APCA_* "
+                  "names — data fetches will fail (shadow-only; trading "
+                  "unaffected)")
+    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +288,10 @@ class Book:
     def load(self):
         try:
             with open(_state_path()) as f:
-                j = json.load(f)
+                raw = f.read().strip()
+            if not raw:
+                return   # fresh boot: writability probe leaves an empty file
+            j = json.loads(raw)
             self.setups = {k: Setup(**v) for k, v in j.get("setups", {}).items()}
             self.pos = {k: Position(**v) for k, v in j.get("pos", {}).items()}
             self.day = j.get("day", "")
