@@ -7,13 +7,30 @@ alpaca) — the engine doesn't know or care which.
 from __future__ import annotations
 
 import logging
+import os
 
+import audit
 from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
 from models import Action, Signal, System
 from risk import position_size
 from safety import market_is_open
 
 log = logging.getLogger("swing")
+
+# ---------------------------------------------------------------------------
+# ENTRY BENCH (2026-07-20 operator decision: "swing has been bleeding").
+# SWING_ENTRIES=false suppresses NEW entries only, at the last possible
+# moment — after every real gate (kill switch, max positions, liquidity,
+# sizing) has passed — so each suppressed line is a full-fidelity shadow
+# trade for the A/B against swing_v2.
+#
+# Deliberately NOT done via ENABLED_SYSTEMS: benching there unbuilds the
+# engine, which (a) trips the benched_held boot HALT while the 4 open swing
+# positions exist, and (b) kills scans and stop management. This flag keeps
+# the engine alive: scans run (ghost #1), manage_open_positions still
+# trails/exits the open book, only the buy is withheld.
+# ---------------------------------------------------------------------------
+SWING_ENTRIES = os.getenv("SWING_ENTRIES", "true").lower() == "true"
 
 
 class NullNotifier:
@@ -66,6 +83,18 @@ class SwingRiskEngine:
                                getattr(self._broker, "cash", 1e12))
         if shares <= 0:
             self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK, "size=0")
+            return
+        if not SWING_ENTRIES:
+            # Full dry-run complete; withhold only the order. Mirrored to the
+            # persistent audit trail (never notifies, never raises) because
+            # Railway purges logs on redeploy and these lines ARE the A/B data.
+            log.warning("SWING1 SHADOW would_trade %s x%.2f @ %.2f stop=%.2f "
+                        "(%s) — entries benched via SWING_ENTRIES=false",
+                        signal.ticker, shares, q.price, stop, signal.reason)
+            audit.record("swing1_shadow_signal", notify=False,
+                         ticker=signal.ticker, shares=round(shares, 2),
+                         px=round(q.price, 2), stop=round(stop, 2),
+                         reason=signal.reason)
             return
         pos = self._broker.buy(signal.ticker, shares, q.price, System.SWING,
                                signal.source, stop)
