@@ -31,14 +31,18 @@ from router import SignalRouter
 from safety import market_is_open, near_close, startup_banner
 from scanner import PriceActionScanner
 from swing_engine import SwingRiskEngine
+from swing_v2 import scan_swing_v2
 from meanrev_engine import MeanReversionEngine
 from xsection import CrossSectionalMomentumEngine
 from trade_logger import TradeLogger
 from trade_record import TradeRecorder
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(name)s %(levelname)s %(message)s")
-log = logging.getLogger("main")
+# Split-stream logging (2026-07-20): DEBUG/INFO -> stdout, WARNING+ ->
+# stderr. The old basicConfig sent everything to stderr, which Railway maps
+# to severity=error — 1,008/1,008 log entries tagged error on Jul 20, real
+# failures indistinguishable from P&L chatter.
+from logging_setup import setup_logging
+log = setup_logging()
 
 # After the close nothing can trade, but the loop was still scanning the
 # full universe every ~5s (observed 2026-07-07, 164 cycles in 15 min after
@@ -140,6 +144,17 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # Manage every book each cycle (even when entries are halted).
     for e in engines:
         e.manage_open_positions()
+
+    # swing_v2 candidate strategy, SHADOW-ONLY (2026-07-20): computes real
+    # signals against live prices and writes would-be trades to the audit
+    # trail; structurally cannot place orders (live mode is refused — see
+    # swing_v2.py). Contained: a v2 failure must never cost a real cycle.
+    # Data budget note: v2 fetches its own daily bars from Alpaca's data API
+    # (free with the existing broker keys) — zero Finnhub budget impact.
+    try:
+        scan_swing_v2(UNIVERSE, equity=broker.equity)
+    except Exception as e:  # noqa: BLE001
+        log.error("swing_v2 shadow scan failed (non-fatal): %s", e)
 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
