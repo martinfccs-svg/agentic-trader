@@ -879,6 +879,19 @@ class AlpacaBroker:
             entry = float(p.avg_entry_price)        # broker fill = truth
             qty = float(p.qty)
             last = float(getattr(p, "current_price", None) or entry)
+            # Restore the TRUE entry time from the registry (2026-07-22).
+            # This was always saved (_save_position_state) but never read
+            # back: every redeploy stamped adopted positions with BOOT time,
+            # silently resetting any holding-period logic — the meanrev
+            # time stop would count from the last deploy, not the entry,
+            # and with several deploys a week it would never fire. Boot
+            # time remains the fallback for a cold registry.
+            entry_time = time.time()
+            if reg and reg.get("entry_time"):
+                try:
+                    entry_time = float(reg["entry_time"])
+                except (TypeError, ValueError):
+                    pass
             # Stop preference: live leg order > registry > 1% fallback
             stop = stop_by_ticker.get(ticker)
             if stop is None and reg and reg.get("stop_price"):
@@ -908,7 +921,7 @@ class AlpacaBroker:
                              "will re-derive from ATR next cycle; VERIFY a "
                              "protective stop exists at the broker.", ticker)
             self.positions[ticker] = Position(
-                ticker, system, qty, entry, time.time(), stop, None,
+                ticker, system, qty, entry, entry_time, stop, None,
                 entry_stop=stop, high_water=max(entry, last), last_price=last)
             log.warning("[ALPACA] reconcile: re-adopted %s x%s [%s] "
                         "entry=%.2f stop=%.2f", ticker, qty, system.value,
