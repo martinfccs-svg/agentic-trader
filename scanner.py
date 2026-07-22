@@ -38,6 +38,9 @@ from indicators import (
 from models import Bars, Signal, SignalSource
 from scan_health import ScanFunnel
 
+import meanrev_scoring as mrs
+import regime
+
 log = logging.getLogger("scanner")
 
 
@@ -109,10 +112,23 @@ class PriceActionScanner:
         return out
 
     # ----- mean reversion: RSI oversold within an uptrend (contrarian) -----
+    # 2026-07-22: multi-factor SCORING added (meanrev_scoring.py) behind
+    # MEANREV_SCORING = off | shadow (default) | live.
+    #   shadow: signals from the CURRENT rule, unchanged; every trigger also
+    #           gets a scorecard logged, so score distributions accumulate
+    #           with zero behavior change.
+    #   live:   signals require hard gates (RSI trigger + close>EMA200 +
+    #           regime risk-on) AND score >= MEANREV_SCORE_MIN of 6.
     def scan_meanrev(self) -> list[Signal]:
         out: list[Signal] = []
         f = self._funnels["meanrev"]
         f.start_pass(len(self._universe))
+        scoring = mrs.SCORING_MODE
+        spy_close = None
+        if scoring in ("shadow", "live"):
+            spy = self._feed.get_daily_bars("SPY")   # slow-TTL cached; 1 call
+            spy_close = spy.close if spy is not None else None
+            market_ok = regime.risk_on(self._feed)
         for t in self._universe:
             bars = self._feed.get_daily_bars(t)
             if bars is None or len(bars.close) < MEANREV.trend_sma_days + 1:
@@ -123,6 +139,29 @@ class PriceActionScanner:
                 continue
             f.count("bars_ok")
             close = bars.close[-1]
+
+            card = None
+            if scoring in ("shadow", "live") and r < MEANREV.rsi_oversold:
+                # Score only triggered names: the trigger is the reason to look.
+                card = mrs.score_candidate(t, bars.close, bars.high, bars.low,
+                                           bars.volume, r,
+                                           MEANREV.rsi_oversold, spy_close)
+                if card:
+                    log.info("meanrev_score %s: score=%d/6 trigger=%s "
+                             "trend_gate=%s market=%s | %s", t, card.score,
+                             card.trigger, card.gate_trend, market_ok,
+                             " ".join(k for k, v in card.factors.items() if v)
+                             or "(no factors)")
+
+            if scoring == "live":
+                if card and card.qualifies() and market_ok:
+                    f.count("uptrend"); f.count("oversold"); f.count("scored")
+                    out.append(Signal(SignalSource.MEAN_REVERSION, t,
+                                      reason=f"RSI={r:.1f} score={card.score}/6 "
+                                             f">EMA200"))
+                continue
+
+            # ---- current rule (off + shadow modes): unchanged behavior ----
             # Buy oversold, but only in a longer-term uptrend (avoid falling knives).
             if not close > trend:
                 continue
@@ -130,6 +169,10 @@ class PriceActionScanner:
             if not r < MEANREV.rsi_oversold:
                 continue
             f.count("oversold")
+            if card is not None and not card.qualifies():
+                log.info("meanrev_score %s: CURRENT rule signals but scored "
+                         "rule would REJECT (score=%d/6 < %d) — divergence "
+                         "logged for the A/B", t, card.score, mrs.SCORE_MIN)
             out.append(Signal(SignalSource.MEAN_REVERSION, t,
                               reason=f"RSI={r:.1f}<{MEANREV.rsi_oversold:.0f}, >SMA{MEANREV.trend_sma_days}"))
         f.finish(len(out))
