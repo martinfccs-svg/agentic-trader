@@ -43,6 +43,8 @@ from models import Action, Signal, SignalSource, System
 from risk import position_size
 from safety import market_is_open
 from scan_health import DailyRebalanceGate
+import regime
+from sector_map import sector_of
 
 log = logging.getLogger("xsectmom")
 
@@ -50,6 +52,13 @@ log = logging.getLogger("xsectmom")
 # max(2 * top_n, 40% of universe). Below the threshold the ranking is
 # considered blind (feed degradation) and the rotation is skipped.
 XSECT_MIN_RANKABLE = int(os.getenv("XSECT_MIN_RANKABLE", "0"))
+
+# Max names per sector in the top-N (2026-07-22). Pure return ranking during
+# a sector rally always selects one correlated cluster N times over — with 14
+# sectors in the pool the live top-3 was AMD/ARM/MU: one semi bet, three
+# tickers. Cap=1 forces the rotation to express N DIFFERENT bets. 0 disables
+# (restores uncapped behavior). Sector labels come from sector_map.py.
+XSECT_SECTOR_CAP = int(os.getenv("XSECT_SECTOR_CAP", "1"))
 
 
 class NullNotifier:
@@ -162,7 +171,43 @@ class CrossSectionalMomentumEngine:
             self._gate.rearm()
             return
 
-        target = {t for _, t in scored[:XSECT.top_n]}
+        # ---- REGIME GATE (2026-07-22) --------------------------------------
+        # Same atomicity as the kill switch: while the market proxy is below
+        # its long SMA, skip the WHOLE rotation (no exits, no entries) and
+        # retry later. Protective stops in manage_open_positions stay live.
+        if not regime.risk_on(self._feed):
+            log.warning("xsect rebalance: REGIME risk-off — rotation SKIPPED "
+                        "whole; holdings keep their stops; gate re-armed")
+            self._gate.rearm()
+            return
+
+        # ---- SECTOR CAP (2026-07-22) ---------------------------------------
+        # Walk the ranking best-first, admit at most XSECT_SECTOR_CAP names
+        # per sector until top_n slots fill. Skipped names are logged so the
+        # cost of diversification is visible per rotation.
+        selection: list[tuple[float, str]] = []
+        if XSECT_SECTOR_CAP > 0:
+            used: dict[str, int] = {}
+            capped_out: list[str] = []
+            for ret, t in scored:
+                if len(selection) >= XSECT.top_n:
+                    break
+                sec = sector_of(t)
+                if used.get(sec, 0) >= XSECT_SECTOR_CAP:
+                    capped_out.append(f"{t}({sec})")
+                    continue
+                used[sec] = used.get(sec, 0) + 1
+                selection.append((ret, t))
+            log.warning("xsect rebalance: sector-capped top%d: %s%s",
+                        XSECT.top_n,
+                        ", ".join(f"{t}[{sector_of(t)}]({r:+.1%})"
+                                  for r, t in selection) or "EMPTY",
+                        f" | capped out: {', '.join(capped_out[:6])}"
+                        if capped_out else "")
+        else:
+            selection = scored[:XSECT.top_n]
+
+        target = {t for _, t in selection}
 
         # Sell names that fell out of the top N.
         for ticker in sorted(held - target):
@@ -190,7 +235,7 @@ class CrossSectionalMomentumEngine:
 
         # Buy new entrants (kill switch already verified before the exits —
         # rotation atomicity: we only get here if entries are permitted).
-        for ret, ticker in scored[:XSECT.top_n]:
+        for ret, ticker in selection:
             if ticker in self._broker.positions:
                 continue
             q = self._feed.get_quote(ticker)
@@ -285,3 +330,4 @@ class CrossSectionalMomentumEngine:
                 except Exception as e:  # noqa: BLE001
                     log.error("xsect stop-exit %s failed (will retry next "
                               "cycle): %s", ticker, e)
+
