@@ -32,6 +32,7 @@ from safety import market_is_open, near_close, startup_banner
 from scanner import PriceActionScanner
 from swing_engine import SwingRiskEngine
 from swing_v2 import scan_swing_v2
+import regime
 from meanrev_engine import MeanReversionEngine
 from xsection import CrossSectionalMomentumEngine
 from trade_logger import TradeLogger
@@ -130,8 +131,17 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # observability (they show what WOULD signal), and daily bars are cached
     # so the scan costs almost nothing.
     if is_open:
-        for sig in swing_sigs + meanrev_sigs + intraday_sigs:
-            router.route(sig)
+        sigs = swing_sigs + meanrev_sigs + intraday_sigs
+        if sigs and not regime.risk_on(feed):
+            # Regime overlay (2026-07-22): entries only. Exits, stops, and
+            # flattens are never regime-gated — reducing risk is always
+            # allowed. Held signals re-derive at the next risk-on scan.
+            log.warning("REGIME risk-off — %d entry signal(s) held, NOT "
+                        "routed (set REGIME_FILTER=off to disable)",
+                        len(sigs))
+        else:
+            for sig in sigs:
+                router.route(sig)
     elif swing_sigs or meanrev_sigs:
         log.info("market closed — %d signal(s) held, NOT routed. They are "
                  "re-derived from live prices at the next open.",
