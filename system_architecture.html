@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Trader — Complete System Map</title>
+<style>
+  :root{--ink:#22252a;--soft:#5c636e;--line:#dfe3e8;--bg:#fbfcfd;
+        --data:#4a5fc1;--exec:#a05a00;--mem:#1a7f4f;--warn:#b23b3b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.65 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:860px;margin:0 auto;padding:44px 24px 80px}
+  h1{font-size:29px;margin:0 0 4px}
+  .date{color:var(--soft);font-size:14px;margin:0 0 24px}
+  h2{font-size:20px;margin:38px 0 10px;padding-top:16px;border-top:1px solid var(--line)}
+  p{margin:0 0 13px}
+  .soft{color:var(--soft)}
+  pre.map{background:#101418;color:#d7dde4;border-radius:10px;padding:20px 18px;
+      overflow-x:auto;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;margin:14px 0 6px}
+  pre.map .d{color:#8fa3ff}   /* data plane */
+  pre.map .x{color:#ffc46b}   /* execution plane */
+  pre.map .m{color:#7fd6a4}   /* memory */
+  pre.map .c{color:#ff8f8f}   /* control/deploy */
+  code{background:#eef1f4;border:1px solid var(--line);border-radius:4px;
+       padding:1px 6px;font:13.5px ui-monospace,Menlo,Consolas,monospace}
+  table{border-collapse:collapse;width:100%;margin:12px 0 6px;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f2f4f7;font-weight:600}
+  .fix{border-left:4px solid var(--warn);background:#fff;padding:12px 14px;
+       border-radius:0 8px 8px 0;margin:10px 0 14px}
+  .fix b:first-child{color:var(--warn)}
+  ul{margin:0 0 13px 20px;padding:0} li{margin:0 0 7px}
+  .legend{font-size:13px;color:var(--soft)}
+  .legend span{display:inline-block;margin-right:16px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Agentic Trader — the complete system map</h1>
+  <p class="date">Corrected and completed from the operator's diagram · 2026-07-22</p>
+
+  <p>Your sketch captured the <b>data half</b> of the system. This document keeps
+  what was right, corrects what was wrong, and adds the half the sketch stopped
+  short of — because in this codebase, most of the hard-won engineering lives
+  <i>after</i> the trading decision, not before it.</p>
+
+  <h2>The full map</h2>
+  <p class="legend">
+    <span><i class="dot" style="background:#8fa3ff"></i>data plane</span>
+    <span><i class="dot" style="background:#ffc46b"></i>execution plane</span>
+    <span><i class="dot" style="background:#7fd6a4"></i>memory (/data volume)</span>
+    <span><i class="dot" style="background:#ff8f8f"></i>build &amp; deploy</span>
+  </p>
+<pre class="map">
+<span class="c">┌──────────────┐   git push    ┌───────────────────────────────────────────┐
+│    GITHUB    │──────────────▶│  RAILWAY  · runs main.py --loop 24/7      │
+│ (the source) │  auto-deploy  │  · env vars: FINNHUB key, ALPACA keys,    │
+└──────────────┘               │    SWING_ENTRIES, XSECT_SECTOR_CAP,       │
+                               │    REGIME_FILTER ...                      │
+                               │  · persistent volume mounted at /data     │
+                               └───────────────────────────────────────────┘</span>
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        MARKET (NASDAQ / NYSE)                           │
+└──────────────┬───────────────────────────────────────┬──────────────────┘
+               │                                       │
+<span class="d">      FINNHUB API (paid)                    ALPACA DATA API (free w/ keys)</span>
+               │                                       │
+   ┌───────────┼────────────┐                          │
+   ▼           ▼            ▼                          ▼
+<span class="d"> DAILY      INTRADAY      QUOTES               DAILY OHLC BARS
+ BARS       1-MIN BARS    (live px, ATR)       (open prices incl. —
+   │           │            │                   Finnhub Bars have none)</span>
+   └───────────┼────────────┘                          │
+               ▼                                       ▼
+<span class="d">   FinnhubFeed (feed_layer.py)                 SWING_V2  · shadow only
+   · rate limiter · circuit breakers           · own data pipe: ZERO
+   · slow-TTL daily cache                        Finnhub budget cost
+   · scale contract: risk = daily ATR          · live orders REFUSED in code</span>
+               │                                       │
+   ┌───────────┼──────────────────┐                    │
+   ▼           ▼                  ▼                    │
+ SCANNER     XSECTMOM        ENGINE QUOTES             │
+ funnels:    daily 10:00 ET  (stops, sizing)           │
+ swing ·     ranking, top-3,                           │
+ meanrev     sector cap                                │
+   │           │                                       │
+   ▼           │                                       │
+ ROUTER ◀── gates: market hours · REGIME (SPY/200SMA) │
+   │           │                                       │
+   ▼           ▼                                       ▼
+ ENGINES: kill switch · max positions ·        <span class="m">phantom trades →</span>
+ liquidity · risk sizing · SWING_ENTRIES=false  <span class="m">audit trail only</span>
+ (old swing logs SHADOW instead of buying)
+               │
+               ▼  buy / sell
+<span class="x">┌─────────────────────────────────────────────────────────────────────┐
+│  BROKERS.PY → ALPACA TRADING API  (the hands)                       │
+│  · bracket orders: entry + GTC protective stop living AT Alpaca     │
+│  · idempotent order IDs (restart ≠ duplicate — the Jul 17 fix)      │
+│  · fill polling: books record real fills, not quote estimates       │
+│  · boot RECONCILE: Alpaca = source of truth; unknown holding =      │
+│    HALT, never trade blind                                          │
+└─────────────────────────────────────────────────────────────────────┘</span>
+               │ every fill / close / halt / regime change
+               ▼
+<span class="m">┌─────────────────────────────────────────────────────────────────────┐
+│  /data (survives every redeploy)          →  ntfy → YOUR PHONE      │
+│  audit.jsonl · trades.jsonl · position_state.json ·                 │
+│  rebalance_gate_state · swing_v2_state.json                        │
+└─────────────────────────────────────────────────────────────────────┘</span>
+</pre>
+
+  <h2>Corrections to the sketch</h2>
+  <div class="fix"><b>1. SWING2 does not drink from Finnhub.</b> Your diagram fed
+    the SWING2 funnel from FinnhubFeed. Deliberately not so: swing_v2 has its own
+    pipe to Alpaca's data API — partly to cost the Finnhub budget nothing, and
+    partly because Finnhub's <code>Bars</code> carry no open prices, and
+    swing_v2's candle patterns (engulfing, hammer) cannot be computed without
+    opens.</div>
+  <div class="fix"><b>2. "SWING2 (UNP, PLD…)" is a mislabel.</b> UNP, PLD, UNH,
+    UPS are <i>old</i> swing's held positions. swing_v2 holds nothing and can
+    hold nothing — it writes phantom trades to the audit trail and refuses live
+    mode in code.</div>
+  <div class="fix"><b>3. The sketch ends where the hard part begins.</b>
+    "Your trading decisions" is the midpoint, not the output. Below it sit the
+    execution layer (where the July 6/16/17 incidents were fought and fixed) and
+    the memory layer (which exists because Railway wipes logs and disk on every
+    redeploy). A map without them explains the bot's ideas but not its scars.</div>
+  <div class="fix"><b>4. GitHub and Railway were missing.</b> Every behavior
+    switch — the bench, the cap, the regime filter — lives as a Railway env var,
+    which is why most changes need no code push to reverse.</div>
+
+  <h2>The four pillars and their uses</h2>
+  <table>
+    <tr><th>Pillar</th><th>Role</th><th>What it's used for here</th></tr>
+    <tr><td><b>GitHub</b></td><td>Blueprint</td><td>Source of truth for code and docs; a push is a deploy. Pushed after hours by policy so redeploys land in a dead market.</td></tr>
+    <tr><td><b>Railway</b></td><td>Body</td><td>Runs the one loop 24/7; holds secrets and switches; mounts <code>/data</code>, the only disk that survives. Known boot personality: cold-cache fetch → brief 429 burst → breakers recover in ~5 min.</td></tr>
+    <tr><td><b>Finnhub</b></td><td>Eyes (paid)</td><td>All live-strategy data: daily bars, 1-min bars, quotes — behind a rate limiter and per-endpoint circuit breakers. The scale contract (risk numbers from daily bars only) lives at this boundary.</td></tr>
+    <tr><td><b>Alpaca</b></td><td>Hands + second eyes</td><td>Trading API executes and holds the GTC protective stops 24/7; boot reconcile treats Alpaca as truth. Its <i>free data API</i> separately feeds swing_v2 and the local backtests.</td></tr>
+  </table>
+
+  <p class="soft" style="margin-top:30px;border-top:1px solid var(--line);padding-top:14px">
+  One sentence: <b>GitHub is the blueprint, Railway is the body, Finnhub is the
+  eyes, the engines are the brain, Alpaca is the hands, and /data is the memory
+  — and the sketch's "trading decision" is merely where the brain hands off to
+  the hands.</b></p>
+</main>
+</body>
+</html>

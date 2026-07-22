@@ -1,0 +1,1550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentic Trader — Benchmark &amp; Status (rev 25)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0F1620; --panel:#15202C; --panel-2:#1B2836; --line:#28384A;
+    --txt:#DCE6F0; --txt-soft:#8FA3B8; --txt-dim:#647A91;
+    --you:#3FA7B8; --retail:#C7913E; --pro:#7E8CF0;
+    --good:#3FB984; --part:#D2A23E; --gap:#D9684C;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:var(--bg);color:var(--txt);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  .mono{font-family:'IBM Plex Mono',monospace}
+  h1,h2,h3{font-weight:700;letter-spacing:-.01em}
+
+  header{padding:58px 0 28px;border-bottom:1px solid var(--line)}
+  .kicker{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--you)}
+  h1{font-size:clamp(28px,5vw,46px);line-height:1.05;margin:13px 0 12px}
+  .sub{color:var(--txt-soft);max-width:66ch;font-size:clamp(15px,1.9vw,18px)}
+  .legend{display:flex;flex-wrap:wrap;gap:18px;margin-top:22px;font-size:13.5px}
+  .legend span{display:flex;align-items:center;gap:7px;color:var(--txt-soft)}
+  .dot{width:11px;height:11px;border-radius:3px;flex:none}
+  .d-you{background:var(--you)} .d-retail{background:var(--retail)} .d-pro{background:var(--pro)}
+
+  section{padding:36px 0;border-bottom:1px solid var(--line)}
+  .ey{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.06em;color:var(--you);margin-bottom:6px}
+  h2{font-size:clamp(21px,3vw,28px);margin-bottom:8px}
+  p{color:var(--txt);margin-bottom:13px} p.soft{color:var(--txt-soft)}
+
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:20px;margin-top:16px}
+  .fig svg{width:100%;height:auto;display:block}
+  .figcap{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--txt-dim);margin-top:12px;letter-spacing:.02em}
+
+  .fixgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px}
+  .fx{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;border-top:3px solid var(--good)}
+  .fx.cal{border-top-color:var(--part)}
+  .fx .tag{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.06em;color:var(--good);text-transform:uppercase}
+  .fx.cal .tag{color:var(--part)}
+  .fx h3{font-size:15.5px;margin:5px 0 6px}
+  .fx p{font-size:13px;color:var(--txt-soft);margin:0}
+  .fx .ba{font-family:'IBM Plex Mono',monospace;font-size:12px;margin-top:9px}
+  .fx .ba .b{color:var(--gap)} .fx .ba .a{color:var(--good)}
+
+  .verdicts{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px}
+  .vc{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;border-top:3px solid}
+  .vc.you{border-top-color:var(--you)} .vc.retail{border-top-color:var(--retail)} .vc.pro{border-top-color:var(--pro)}
+  .vc h3{font-size:16px;margin-bottom:4px} .vc .who{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.05em;color:var(--txt-dim);text-transform:uppercase}
+  .vc p{font-size:13.5px;color:var(--txt-soft);margin:8px 0 0}
+
+  .matrix{width:100%;border-collapse:collapse;margin-top:18px;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .matrix th,.matrix td{padding:11px 13px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  .matrix thead th{background:var(--panel-2);font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--txt-soft)}
+  .matrix tbody tr:last-child td{border-bottom:none}
+  .matrix td:first-child{font-weight:600;width:20%}
+  .rate{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;letter-spacing:.03em;white-space:nowrap}
+  .r-good{background:rgba(63,185,132,.14);color:var(--good)}
+  .r-part{background:rgba(210,162,62,.16);color:var(--part)}
+  .r-gap{background:rgba(217,104,76,.16);color:var(--gap)}
+  .matrix td .note{display:block;color:var(--txt-dim);font-size:12px;margin-top:3px}
+  .matrix .pro-col{color:var(--txt-soft)}
+
+  .road{counter-reset:step;margin-top:14px}
+  .step{display:grid;grid-template-columns:42px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}
+  .step:last-child{border-bottom:none}
+  .step .n{counter-increment:step;font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--you);font-size:15px}
+  .step .n::before{content:counter(step,decimal-leading-zero)}
+  .step h3{font-size:15.5px;margin-bottom:3px} .step p{font-size:13.5px;color:var(--txt-soft);margin:0}
+  .prio{font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:5px;margin-left:8px;letter-spacing:.04em}
+  .prio.hi{background:rgba(217,104,76,.16);color:var(--gap)}
+  .prio.md{background:rgba(210,162,62,.16);color:var(--part)}
+  .prio.done{background:rgba(63,185,132,.14);color:var(--good)}
+
+  .callout{border-left:3px solid var(--you);background:var(--panel);padding:15px 18px;border-radius:0 10px 10px 0;margin-top:16px}
+
+  /* live results (rev 7) */
+  .lr-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
+  .lr-stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 15px}
+  .lr-stat .k{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt-dim)}
+  .lr-stat .v{font-family:'IBM Plex Mono',monospace;font-size:21px;font-weight:600;margin-top:5px;font-variant-numeric:tabular-nums}
+  .lr-stat .s{font-size:12px;color:var(--txt-soft);margin-top:2px}
+  .lr-up{color:var(--good)} .lr-dn{color:var(--gap)} .lr-bn{color:var(--pro)}
+  .matrix td.r,.matrix th.r{text-align:right;font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+  @media (max-width:700px){.lr-stat .v{font-size:18px}}
+  .callout.warn{border-left-color:var(--gap)} .callout.good{border-left-color:var(--good)}
+  .callout b{color:var(--txt)}
+  footer{padding:28px 0 56px;color:var(--txt-dim);font-size:12.5px}
+
+  @media(max-width:780px){
+    .verdicts,.fixgrid{grid-template-columns:1fr}
+    .matrix{font-size:12.5px;display:block;overflow-x:auto}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">Agentic Trader · Benchmark &amp; Status · rev 25 · 2026-07-22 · EOD push</div>
+    <h1>The portfolio learns what a sector is — and the system gets its map</h1>
+    <p class="sub">Two revs land in one EOD Jul&nbsp;22 push: the diversification package (rev&nbsp;24) and the complete system map (rev&nbsp;25 — the operator's from-memory architecture sketch, corrected and completed in system_architecture.html). The package: Origin: with 14 sectors deliberately built into the universe, the live rotation still selected AMD/ARM/MU — <b>one semiconductor bet expressed three times</b>, because pure return ranking cannot see sectors. Three independent controls ship, each behind its own switch and its own evidence gate: a <b>sector cap</b> in the xsect rotation (max 1 name/sector in the top-N), a <b>regime filter</b> (no new entries anywhere while SPY sits below its 200-day SMA — entries only; exits are never gated; fails open on data problems), and <b>five universe additions</b> (ABBV, MRK, PGR, CME, DHI) widening healthcare, insurance, exchange, and rate-cyclical streams. A rotation-replay harness prices the cap before it trades: on synthetic single-sector trends, uncapped rotation spent 35% of days as a three-ticker monoculture; capped spent zero. Nothing in this package deploys past its backtest.</p>
+    <div class="legend">
+      <span><i class="dot d-you"></i> Your Agentic Trader</span>
+      <span><i class="dot d-retail"></i> Successful retail</span>
+      <span><i class="dot d-pro"></i> Professional desk</span>
+    </div>
+  </header>
+
+  <section>
+    <div class="ey">NEW · REV 25 · JUL 22 — THE SYSTEM MAPPED, THE SKETCH CORRECTED</div>
+    <h2>Four pillars, two data pipes, one memory</h2>
+    <p class="soft">The operator drew the architecture from memory — Market &rarr; Finnhub &rarr; strategies &rarr;
+      "trading decisions" — and asked for the complete build. The sketch captured the data half faithfully;
+      the corrected full map now ships as <span class="mono">system_architecture.html</span>. Blueprint: GitHub.
+      Body: Railway (env-var switches, /data volume — the only disk that survives a redeploy). Eyes: Finnhub,
+      paid, behind rate limiter and breakers. Hands: Alpaca Trading API, holding the GTC stops 24/7 and serving
+      as source-of-truth at boot reconcile. Second eyes: Alpaca's free data API, feeding swing_v2 and every
+      local backtest at zero Finnhub cost.</p>
+    <div class="fixgrid">
+      <div class="fx cal">
+        <div class="tag">Correction · recorded</div>
+        <h3>The sketch's three misses</h3>
+        <p>(1) It fed SWING2 from Finnhub — wrong twice over: v2 has its own Alpaca pipe by design (zero
+          Finnhub budget, and Finnhub Bars carry no open prices, without which v2's candle patterns cannot
+          exist). (2) It labeled SWING2 with UNP/PLD — those are OLD swing's positions; v2 holds nothing and
+          can hold nothing. (3) It ended at "your trading decisions" — the midpoint, not the output: the
+          execution layer where the Jul 6/16/17 incidents were fought, and the /data memory layer that exists
+          because Railway wipes everything else, both sat below the sketch's last box.</p>
+        <div class="ba"><span class="b">data half, from memory</span> &rarr; <span class="a">full map, from the code</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Docs shipped</div>
+        <h3>system_architecture.html + plain-English explainer</h3>
+        <p>Two documents join the repo: the complete system map (color-coded data / execution / memory /
+          deploy planes, the four corrections, and a pillar-by-pillar uses table) and
+          <span class="mono">diversification_explained.html</span> (rev 24's changes in plain language, with the
+          day-one rotation pre-announced). Rule they serve: the operator should never have to reconstruct the
+          architecture from memory again — memory produced a map missing the half with the scars.</p>
+        <div class="ba"><span class="a">the map now lives next to the territory</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Finding</div>
+        <h3>Finnhub was load-bearing and half-forgotten</h3>
+        <p>The operator believed the build was GitHub + Railway + Alpaca. It is four pillars: Finnhub (paid
+          tier) supplies every live strategy's bars and quotes; the boot 429 bursts and breaker choreography
+          the logs show weekly ARE Finnhub. Verification path recorded: FINNHUB_API_KEY in Railway variables —
+          were it absent, the bot would boot SimulatedFeed and trade real paper orders against fake prices,
+          loudly. Migration to Alpaca data is possible but is a feed-layer project for after the current
+          experiments, not a cleanup.</p>
+        <div class="ba"><span class="b">three pillars remembered</span> &rarr; <span class="a">four pillars, one invoiced</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Arithmetic · pending check</div>
+        <h3>63 + 5 = 68, if the table matches the config</h3>
+        <p>The sector table sums to exactly 63 and its percentages confirm it; the funnel scans 63. If
+          config.UNIVERSE matches the table, the additions take it to 68 — sector_map covers all 68, and any
+          gap logs an unmapped-name warning rather than breaking. Standing check before the additions ship:
+          eyeball config.UNIVERSE against the table once; layering adds onto a mismatched list is how caps get
+          applied to ghosts.</p>
+        <div class="ba"><span class="a">count verified before it changes</span></div>
+      </div>
+    </div>
+  </section>
+
+
+  <section>
+    <div class="ey">NEW · REV 24 · JUL 22 — DIVERSIFICATION: SECTOR CAP, REGIME FILTER, UNIVERSE ADDS</div>
+    <h2>Fourteen sectors in the pool, one bet in the book — fixed at the selector</h2>
+    <p class="soft">The universe was never the problem: energy, utilities, staples, gold, REITs, defense — the
+      risk-off streams were all present. The selector was blind to them. This rev gives the rotation
+      sector-awareness, gives the whole system one regime reflex, and widens four correlation streams —
+      each piece independently switchable, each gated on its own replay evidence.</p>
+    <div class="fixgrid">
+      <div class="fx">
+        <div class="tag">Shipped · behind switch</div>
+        <h3>Sector cap in the rotation</h3>
+        <p>XSECT_SECTOR_CAP=1 (0 restores old behavior, no redeploy): the ranking walk admits at most one name
+          per sector until top-N fills, logging every capped-out name so diversification's cost is visible per
+          rotation. sector_map.py encodes the operator's 14-sector table with one deliberate merge — tech/semis
+          + emerging-compute (SMCI/ARM/MU/IONQ) are ONE sector, because they trade as one cluster and a finer
+          label would let the cap hold two of them. Unmapped names fail open: selectable, never crowding.</p>
+        <div class="ba"><span class="b">top3 = AMD/ARM/MU (one trade)</span> &rarr; <span class="a">top3 = three different bets</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Shipped · behind switch</div>
+        <h3>Regime filter — noticing the weather</h3>
+        <p>Every strategy is long-only momentum-family; in a decline they all lose or idle together. regime.py:
+          no NEW entries anywhere while SPY &lt; 200-day SMA. Entries only — exits, stops, flattens are never
+          gated. Fails OPEN on missing/shallow data with a loud log (a protective overlay must never become a
+          deadlock class — the 2026-07-07 lesson). State changes are logged, audit-mirrored, phone-notified.
+          Wired twice: main.py holds routed signals; xsection.py skips rotations whole (kill-switch atomicity).
+          REGIME_FILTER=off is the escape hatch.</p>
+        <div class="ba"><span class="b">four strategies, zero reflexes</span> &rarr; <span class="a">one shared reflex, exits untouched</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Shipped · gated on replay</div>
+        <h3>Five additions, four new streams (63 &rarr; 68)</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:13.5px;margin:6px 0 10px">
+          <tr>
+            <th style="text-align:left;padding:5px 8px;border-bottom:1px solid rgba(128,128,128,.35)">Ticker</th>
+            <th style="text-align:left;padding:5px 8px;border-bottom:1px solid rgba(128,128,128,.35)">What it adds</th>
+          </tr>
+          <tr><td style="padding:5px 8px;white-space:nowrap"><b>ABBV, MRK</b></td>
+              <td style="padding:5px 8px">More healthcare depth — the pool had 4 names vs. 8 in defense.</td></tr>
+          <tr><td style="padding:5px 8px"><b>PGR</b></td>
+              <td style="padding:5px 8px">An insurer — the financials were all banks and card networks; insurance is a different rate/credit stream.</td></tr>
+          <tr><td style="padding:5px 8px"><b>CME</b></td>
+              <td style="padding:5px 8px">An exchange — one of the few stocks that tends to do <i>well</i> when markets get turbulent.</td></tr>
+          <tr><td style="padding:5px 8px"><b>DHI</b></td>
+              <td style="padding:5px 8px">A homebuilder — direct benefit from interest-rate cuts, which nothing else on the list gives.</td></tr>
+        </table>
+        <p>Deliberately NOT added: more semis, more defense, small caps. Rule: additions change xsect
+          rankings on day one, so they enter config.UNIVERSE only after the replay prices them — and only
+          after the one-time eyeball confirming config matches the sector table (then 63&nbsp;+&nbsp;5&nbsp;=&nbsp;68).</p>
+        <div class="ba"><span class="a">config.UNIVERSE + 5, only if the tables approve</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Evidence harness</div>
+        <h3>backtest_xsect.py — the cap priced before it trades</h3>
+        <p>Replays the rotation over history: capped vs uncapped, optional --regime and --with-additions, vs
+          hold-SPY. Reports the number the cap exists to kill — <b>monoculture%</b> (days the top-3 was one
+          sector three times over) — plus avg distinct sectors, turnover, Sharpe, maxdd. Synthetic verification:
+          uncapped 35% monoculture / 1.76 avg sectors; capped 0% / 3.00, trailing in raw return exactly as a
+          cap should during a one-sector melt-up. Judgment rule: cap1 is judged on maxdd + Sharpe across BOTH
+          windows, never on total return in a rally it deliberately refuses to concentrate into.</p>
+        <div class="ba"><span class="a">diversification's price: measured, not argued</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Known day-one effect</div>
+        <h3>The cap will sell two of AMD/ARM/MU</h3>
+        <p>If cap=1 goes live while the book holds the semi trio, the next 10:00 rotation exits two (capped out)
+          and enters the top non-tech names. That is the feature, not a bug — but it is a real, immediate
+          portfolio change, recorded here in advance so nobody mistakes it for a malfunction. Phase-in path:
+          deploy with XSECT_SECTOR_CAP=0, flip to 1 by env var when ready.</p>
+        <div class="ba"><span class="b">surprise rotation</span> &rarr; <span class="a">pre-announced rotation</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Sequencing · operator</div>
+        <h3>Order of verdicts</h3>
+        <p>Swing first: autopsy + two-window swing_v2 backtest remain the standing homework, and the
+          four-position decision follows them. The diversification pieces deploy after — except regime.py,
+          purely protective, cleared to fast-track. Every switch independent: cap, regime, additions can each
+          ship, wait, or die on its own table. Nothing in rev 24 changes the broker path; reconcile is untouched.</p>
+        <div class="ba"><span class="a">three decisions, three tables, no bundling</span></div>
+      </div>
+    </div>
+  </section>
+
+
+  <section>
+    <div class="ey">NEW · REV 23 · JUL 21 — FIRST CLEAN CLOSE, AUTOPSY TOOLING, ZERO TRADES BY CHOICE</div>
+    <h2>The machine measures; nobody flinched</h2>
+    <p class="soft">Two sessions under the shadow regime. No trades fired anywhere — and for the first time that
+      is fully explainable rather than suspicious: every scan on both swing systems ends in a funnel line naming
+      the gate that said no. Equity Friday $96,215 &rarr; Tuesday close ~$97,499.</p>
+    <div class="fixgrid">
+      <div class="fx">
+        <div class="tag">Confirmed live</div>
+        <h3>Ghost #2 sees the market</h3>
+        <p>Yesterday's start-date fix verified in production: the funnel flipped from
+          <span class="mono">insufficient_history=63</span> to real attrition —
+          <span class="mono">trend_filter=40 no_pullback=6 no_bullish_candle=8 setup_volume=9</span>, summing to
+          all 63 names. Through the close the kills evolved exactly as final candles completed (candle failures
+          11&rarr;8, volume kills 6&rarr;9), then froze byte-identical after the bell — recomputing truth, not noise.
+          Zero setups in two days: a selective system being patient, with receipts.</p>
+        <div class="ba"><span class="b">kills: insufficient_history=63</span> &rarr; <span class="a">every name accounted for</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Milestone</div>
+        <h3>First incident-free close under observation</h3>
+        <p>The bell has been this bot's crime scene (Jul&nbsp;16 stale-quote liquidations, Jul&nbsp;17
+          into-closed-market orders). Today: market_open flipped at 20:00:04Z, cadence dropped to 60s, the
+          post-close daily-bar refresh produced no routable signals, and the held-not-routed safety never needed
+          to engage. 1,016/1,016 log lines info; zero warnings, zero errors, zero after-hours orders.</p>
+        <div class="ba"><span class="b">closes = incidents</span> &rarr; <span class="a">closes = boring</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Discovery · tooling shipped</div>
+        <h3>trades.jsonl is empty &rarr; autopsy.py</h3>
+        <p>Every close to date predates the recorder wiring, so the promised autopsy dataset didn't exist.
+          Shipped <span class="mono">autopsy.py</span> (local tool): reads audit.jsonl close events, falls back to
+          rebuilding FIFO round trips from Alpaca's own order history with bot-{system} coid attribution, and
+          prints win%, avg win/loss, profit factor, exit paths, and worst-loser concentration.
+          <span class="mono">--exclude-dates</span> shows stats with and without known incident days — the
+          strategy is tried only for its own crimes, not the infrastructure's.</p>
+        <div class="ba"><span class="a">verdict heuristic: bad entries vs broken exits vs incident-dominated</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Correction · governance</div>
+        <h3>"8 setups queued" — a misread worth immortalizing</h3>
+        <p>A status report read <span class="mono">setup_volume=8</span> as eight setups waiting and advised the
+          entries flag could be enabled to fire them. Both halves wrong: those 8 were <b>kills</b> (failed the
+          volume gate; <span class="mono">setups_active=0</span> is the queue, and it reads zero), and
+          SWING_ENTRIES gates <b>old</b> swing — flipping it would re-arm the benched bleeding strategy, not
+          launch v2, which refuses live mode in code. Rule recorded: funnel kill counts are obituaries, not
+          waiting lists, and no flag gets flipped on a status report's say-so.</p>
+        <div class="ba"><span class="b">"ready — enable when desired"</span> &rarr; <span class="a">flag untouched</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Numbers</div>
+        <h3>Two sessions, zero trades, book breathing</h3>
+        <p>Swing unrealized &minus;$1,290 &rarr; &minus;$679 (favorable drift, not vindication — PLD/UNP remain
+          2&times;/3&times; duplicate-stack residue and the close-vs-retrofit call stands). Xsectmom +$44 &rarr;
+          +$949 riding AMD/ARM/MU; its 10:00 gate fired once daily, ranked 63/63, and correctly changed nothing.
+          Old swing's <span class="mono">breakout=3</span> sat at the 1.3&times; volume gate all day — the bench
+          gate ends day two deployed but unexercised, so the live A/B has zero swing samples yet; verdict weight
+          shifts to autopsy + backtest.</p>
+        <div class="ba"><span class="a">every zero has a reason attached</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Tonight · operator</div>
+        <h3>The evidence run</h3>
+        <p>1) UNH broker-side GTC stop leg: verify in the dashboard (only live-risk item). 2) Autopsy:
+          <span class="mono">cat /data/audit.jsonl</span> off the volume, run autopsy.py; if thin,
+          <span class="mono">--from-alpaca</span>. 3) Backtest swing_v2, both windows
+          (<span class="mono">--days 730</span> / <span class="mono">365</span>) vs hold-SPY. 4) Batch the
+          autopsy.py commit after hours — one redeploy into a dead market. Then the swing verdict gets argued
+          from tables, and the four-position decision follows it.</p>
+        <div class="ba"><span class="a">two of three evidence streams land tonight</span></div>
+      </div>
+    </div>
+  </section>
+
+
+  <section>
+    <div class="ey">NEW · REV 22 · JUL 20 — SWING BENCHED, SHADOW A/B LIVE</div>
+    <h2>Stop the bleeding first, decide with evidence second</h2>
+    <p class="soft">Swing has bled since inception (&minus;$1,290 unrealized on 4 names at rev time). Instead of
+      swapping strategies on a feeling, today separates the two possible diagnoses — dead edge vs broken exits —
+      and builds the machinery that answers it. Nothing shipped today can place a trade that couldn't be placed
+      yesterday; two components only <i>remove</i> trading ability.</p>
+    <div class="fixgrid">
+      <div class="fx">
+        <div class="tag">Shipped</div>
+        <h3>Old swing: entries benched, engine alive</h3>
+        <p>SWING_ENTRIES=false gates the buy at the last gate — after kill switch, caps, liquidity and sizing —
+          so every suppressed signal is a full-fidelity shadow trade (ghost&nbsp;#1). Scans, funnels, trailing
+          stops and the 4 open positions' management all keep running. Deliberately not ENABLED_SYSTEMS:
+          that unbuilds the engine and trips the benched_held boot halt.</p>
+        <div class="ba"><span class="b">before: bleeding entries</span> &rarr; <span class="a">after: shadow-only, exits intact</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Shipped</div>
+        <h3>swing_v2: candidate strategy, structurally shadow</h3>
+        <p>Pullback to 20-EMA in an uptrend, confirmed bullish candle, break of setup high (two entry variants
+          A/B shadowed side-by-side), stop at the farther of 1&times;ATR below entry low or the swing low, half
+          off at +2R to breakeven, EMA20 + 15-day time exits, 0.75% risk sizing. Live mode is <b>refused in
+          code</b>: raw orders would violate the bot-{system} coid convention and halt as orphans at reconcile.
+          Zero Finnhub cost — it feeds from Alpaca daily bars.</p>
+        <div class="ba"><span class="a">ghost #2 live · backtest harness runs locally on the same signal code</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Shipped</div>
+        <h3>Log severities finally honest</h3>
+        <p>basicConfig sent everything to stderr, so Railway tagged 1,008/1,008 lines severity=error on Jul 20 AM.
+          Split-stream handler now routes INFO&rarr;stdout, WARNING+&rarr;stderr. First post-deploy log:
+          296 info / 30 error, and every red line was a real event.</p>
+        <div class="ba"><span class="b">before: 100% error</span> &rarr; <span class="a">after: red means red</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Found live · fixed</div>
+        <h3>swing_v2 first-deploy bugs (2)</h3>
+        <p>Key naming: read only APCA_* while this repo exports ALPACA_* — every fetch 403'd (Railway's env
+          suggestion caught it; _auth now accepts both, repo names first). Missing <span class="mono">start</span>
+          param: Alpaca defaults to the current day, returning ~1 bar/symbol — the funnel's
+          <span class="mono">insufficient_history=63</span> was this bug, not a data outage. Both contained:
+          worst case was no shadow data, zero trading impact.</p>
+        <div class="ba"><span class="b">kills: insufficient_history=63</span> &rarr; <span class="a">real attrition next boot</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Finding</div>
+        <h3>The swing book carries incident residue</h3>
+        <p>Reconcile shows PLD &times;130 and UNP &times;96 — the Jul 16/17 restart-duplication stacks (2&times; and
+          3&times; sanctioned size, since guarded against). Part of the swing bleed is a fixed bug's leftovers, not
+          pure strategy underperformance — which tips the open-positions call toward close-and-restart-clean.
+          UNH adopted with stop=0.0 (cold registry): engine re-derives from ATR, but <b>verify its broker-side
+          GTC leg exists</b>.</p>
+        <div class="ba"><span class="b">4 positions, &minus;$1,290, 2 oversized</span> &rarr; <span class="a">decision due this week</span></div>
+      </div>
+      <div class="fx cal">
+        <div class="tag">Pending · operator</div>
+        <h3>Three evidence streams, then the verdict</h3>
+        <p>1) Autopsy: /data/trades.jsonl already holds every closed trade with r-multiples — pull and filter
+          system=swing. 2) Backtest: swing_v2 four configs vs hold-SPY on --days 730 and 365, pessimistic
+          gap-through fills. 3) Live A/B: ghost #1 vs ghost #2 in the audit trail. Bar for v2 deployment:
+          beat SPY on Sharpe with shallower max drawdown, both windows, after costs — expect configs to fail;
+          that is the harness working.</p>
+        <div class="ba"><span class="a">no strategy ships on vibes again</span></div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- TODAY: COHERENCE FIXES -->
+  <section>
+    <div class="ey">NEW · TODAY'S COHERENCE FIXES (CONFIRMED DEPLOYED)</div>
+    <h2>Parameters that fought their own design</h2>
+    <p class="soft">A full parameter audit found three settings that were internally inconsistent — not
+      wrong thresholds (those are backtest questions) but knobs working against the strategies they serve.
+      All three fixed, tested, and confirmed live on Railway.</p>
+    <div class="fixgrid">
+      <div class="fx">
+        <div class="tag">Fix A · daily loss halt</div>
+        <h3>Loss limit now scales with equity</h3>
+        <p>The flat $2,500 halt was the same stale-dollar bug class as the old position cap. Now 2.5% of
+          current equity via <span class="mono">daily_loss_dollars()</span>, read dynamically by the kill
+          switch. Legacy env override removed from Railway.</p>
+        <div class="ba"><span class="b">before: flat $2,500 forever</span><br><span class="a">after: $2,500 @ $100k · $1,250 @ $50k · auto-scales</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Fix B · trailing stop</div>
+        <h3>Intraday trail actually functions</h3>
+        <p>The 6% trail was 15× wider than the ~0.4% initial stop — it could never engage before EOD
+          flatten, so "trailing" exits didn't exist. At 1% it matches the trade's scale: runners now
+          ratchet stops behind them and lock in gains.</p>
+        <div class="ba"><span class="b">before: trail never engaged</span><br><span class="a">after: functional at intraday scale</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">Fix C · rebalance cadence</div>
+        <h3>Cross-sectional rebalances daily</h3>
+        <p>A 6-month-lookback ranking was re-run every ~25 minutes — churning positions on ranking noise
+          and paying costs for zero information. Now ~daily (780 cycles). Backtest rebalances weekly in
+          day-units independently; xsectmom went from starved to 39 trades over a synthetic year.</p>
+        <div class="ba"><span class="b">before: re-rank every 25 min</span><br><span class="a">after: daily live · weekly in backtest</span></div>
+      </div>
+    </div>
+
+    <div class="ey" style="margin-top:30px">YESTERDAY · CALIBRATION FIXES (LIVE-DISCOVERED)</div>
+    <div class="fixgrid">
+      <div class="fx cal">
+        <div class="tag">sizing</div>
+        <h3>Equity-scaled position cap</h3>
+        <p>Stale flat $3,000 cap was crushing 1%-risk sizing ~200× ($5/trade). Now 10% of equity —
+          risk ≈ $25–45/trade and scaling.</p>
+      </div>
+      <div class="fx cal">
+        <div class="tag">stops</div>
+        <h3>Intraday stops 1.0× → 2.5× ATR</h3>
+        <p>0.1–0.2% stops were single-minute noise: MSFT re-entered 7×, AAPL 5× in 100 min. Stops now
+          ~0.4%, beyond ordinary chop.</p>
+      </div>
+      <div class="fx cal">
+        <div class="tag">liquidity</div>
+        <h3>Per-minute vs daily unit bug</h3>
+        <p>Intraday compared per-minute volume to a daily $5M threshold (~390× too strict), silently
+          rejecting PLTR. Now tests daily volume.</p>
+      </div>
+    </div>
+    <div class="ey" style="margin-top:30px">NEW · STRUCTURAL EXPANSION</div>
+    <div class="fixgrid">
+      <div class="fx">
+        <div class="tag">universe</div>
+        <h3>16 mega-caps → 63 names, 14 sectors</h3>
+        <p>Tech/semis, consumer, communication, financials, healthcare, energy, industrials, defense, utilities, staples, materials, REITs, logistics. Four
+          "uncorrelated" strategies were fishing in one correlated pond; now diversification has real
+          material, and the cross-sectional top-3 ranks a meaningful pool.</p>
+        <div class="ba"><span class="b">before: one correlated pond</span><br><span class="a">after: cross-sector breadth</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">tiered scanning</div>
+        <h3>Daily bars on slow refresh, intraday on a liquid subset</h3>
+        <p>Daily candles don't change during the session — they now refresh every ~15 min across the full
+          universe, while only a 12-name liquid subset pays the per-cycle 1-min data cost. Stale-serve
+          fallback if a fetch fails.</p>
+        <div class="ba"><span class="b">naive: ~150+ calls/min naive</span><br><span class="a">tiered: ~50/min, 3x headroom</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">budget test</div>
+        <h3>Rate budget enforced by the test suite</h3>
+        <p>A self-test now computes worst-case steady-state calls/min from the live config and fails if it
+          exceeds 80% of the limiter — the 429 storms can't silently return via a config change.</p>
+        <div class="ba"><span class="a">est. 52/min vs 140 limit ✓</span></div>
+      </div>
+    </div>
+    <div class="ey" style="margin-top:30px">THE UNIVERSE · 63 NAMES / 14 SECTORS · 12 INTRADAY</div>
+    <h2 style="font-size:20px">What the bot actually watches</h2>
+    <p class="soft">Full universe scanned by the daily strategies (swing, mean-reversion, cross-sectional).
+      Names marked ● are the 12-name liquid intraday subset — <b>dormant while intraday is benched (Jul 8)</b>, which also retires its per-cycle 1-minute data cost. Override with <span class="mono">UNIVERSE</span> / <span class="mono">INTRADAY_UNIVERSE</span> env vars. Universe config last updated Jul 3, 2026.</p>
+    <div class="lr-stats">
+      <div class="lr-stat"><div class="k">Total stocks</div><div class="v">63</div><div class="s">full daily universe</div></div>
+      <div class="lr-stat"><div class="k">Intraday stocks</div><div class="v">12</div><div class="s">liquid subset ●</div></div>
+      <div class="lr-stat"><div class="k">Sectors</div><div class="v">14</div><div class="s">diversification</div></div>
+      <div class="lr-stat"><div class="k">Strategies</div><div class="v">3<span style="font-size:13px;color:var(--txt-dim)"> +1</span></div><div class="s">active · intraday benched Jul 8</div></div>
+      <div class="lr-stat"><div class="k">Risk management</div><div class="v">10</div><div class="s">layers</div></div>
+    </div>
+    <table class="matrix">
+      <thead><tr><th style="width:24%">Sector</th><th>Tickers</th><th style="width:34%">Why it's in the pool</th></tr></thead>
+      <tbody>
+        <tr><td>Tech / semis<span class="note">8 · 12.7%</span></td><td><span class="mono">AAPL● MSFT● NVDA● AMD● AVGO● CRM INTC PLTR●</span></td><td class="pro-col">Core growth + the intraday book's natural habitat.</td></tr>
+        <tr><td>Consumer / retail<span class="note">8 · 12.7%</span></td><td><span class="mono">AMZN● TSLA● WMT COST HD MCD NKE DIS</span></td><td class="pro-col">Discretionary demand cycle; TSLA/AMZN carry intraday volume.</td></tr>
+        <tr><td>Communication / media<span class="note">4 · 6.3%</span></td><td><span class="mono">GOOGL● META● NFLX● T</span></td><td class="pro-col">Ad + subscription economics, distinct from hardware tech.</td></tr>
+        <tr><td>Financials<span class="note">5 · 7.9%</span></td><td><span class="mono">JPM● BAC GS V MA</span></td><td class="pro-col">Rate-curve and credit drivers; banks + payment rails.</td></tr>
+        <tr><td>Healthcare<span class="note">4 · 6.3%</span></td><td><span class="mono">UNH JNJ LLY PFE</span></td><td class="pro-col">Defensive earnings, policy-driven — weakly tied to tech.</td></tr>
+        <tr><td>Energy<span class="note">3 · 4.8%</span></td><td><span class="mono">XOM CVX COP</span></td><td class="pro-col">Oil-price driven; historically low correlation to growth.</td></tr>
+        <tr><td>Industrials<span class="note">4 · 6.3%</span></td><td><span class="mono">CAT BA GE UPS</span></td><td class="pro-col">Global capex cycle.</td></tr>
+        <tr><td>Defense<span class="note">8 · 12.7%</span></td><td><span class="mono">LMT RTX NOC GD LHX HII TDG HWM</span></td><td class="pro-col">Government contract cycles + geopolitics — least tech-correlated growth pocket.</td></tr>
+        <tr><td>Utilities<span class="note">3 · 4.8%</span></td><td><span class="mono">NEE DUK SO</span></td><td class="pro-col">Classic risk-off defensives; often rise when risk assets sell.</td></tr>
+        <tr><td>Consumer staples<span class="note">3 · 4.8%</span></td><td><span class="mono">PG KO PEP</span></td><td class="pro-col">Every-regime demand; the other recession-resistant stream.</td></tr>
+        <tr><td>Materials (incl. gold)<span class="note">3 · 4.8%</span></td><td><span class="mono">LIN FCX NEM</span></td><td class="pro-col">Commodity-input driven; NEM (gold) is the anti-correlation hedge.</td></tr>
+        <tr><td>REITs<span class="note">2 · 3.2%</span></td><td><span class="mono">PLD AMT</span></td><td class="pro-col">Rate-driven real-asset stream; PLD doubles as logistics real estate.</td></tr>
+        <tr><td>Logistics / transports<span class="note">2 · 3.2%</span></td><td><span class="mono">FDX UNP</span></td><td class="pro-col">Freight volumes and rails; breadth more than diversification.</td></tr>
+        <tr><td>Emerging tech<span class="note">6 · 9.5%</span></td><td><span class="mono">SMCI ARM MU IONQ AVAV KTOS</span></td><td class="pro-col">Higher-beta AI/quantum/defense-tech satellites — the volatility sleeve, sized by the same risk caps as everything else.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="ey" style="margin-top:30px">NEW · LIVE-DISCOVERED · HOLIDAY CALENDAR</div>
+    <div class="fixgrid">
+      <div class="fx">
+        <div class="tag">calendar bug</div>
+        <h3>Bot traded a holiday as a normal day</h3>
+        <p>July 3, 2026 (July 4 observed): market closed all day, yet logs showed
+          <span class="mono">market_open=True</span> — the open-check only knew weekdays and clock time.
+          Harmless on frozen prices; dangerous on a <b>half-day</b>, where the EOD flatten would wait for a
+          16:00 close that never comes and hold intraday positions into a long weekend.</p>
+        <div class="ba"><span class="b">before: weekday + clock only</span><br><span class="a">after: full NYSE holiday + 13:00 early-close calendar, computed by rule for any year; flatten keys off the real close</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">ops lesson 1</div>
+        <h3>Redeploys erase the evidence</h3>
+        <p>The mid-day redeploy wiped the old container — including <span class="mono">trades.jsonl</span>,
+          the file feeding Monte Carlo's 30-trade bar. Every redeploy resets the count to zero.</p>
+        <div class="ba"><span class="a">action: attach a Railway persistent volume for trades.jsonl (operational, pending)</span></div>
+      </div>
+      <div class="fx">
+        <div class="tag">ops lesson 2</div>
+        <h3>The state-persistence gap, demonstrated live</h3>
+        <p>The old container was killed mid-session with no guaranteed shutdown flatten. Had positions been
+          open, they'd have been orphaned at Alpaca with no bot managing stops. Holiday + empty book = lucky
+          twice.</p>
+        <div class="ba"><span class="a">rule until built: no redeploys during market hours; reconcile-on-boot moves up the roadmap</span></div>
+      </div>
+    </div>
+    <div class="callout good"><b>Net state of the config:</b> sizing, stops, filters, loss limits, trailing,
+      rebalance cadence, universe breadth, data-rate budget, and the market calendar are all coherent and
+      enforced by tests. Strategy thresholds (rel-volume, RSI levels, lookbacks) remain deliberately
+      untouched — those are backtest questions, not live-feel questions.</div>
+  </section>
+
+  <!-- LIVE RESULTS (rev 7) -->
+  <section>
+    <div class="ey">NEW · LIVE RESULTS · JUL 6–7 SCOREBOARD</div>
+    <h2>Two sessions on the book — the tape and the machine</h2>
+    <p class="soft">Through Thu Jul 16 the account sits near <b class="mono">≈$97,373</b>, −2.6% from inception.
+      Two things happened this week, and they point in opposite directions. The ATR unit bug (scar ⑥) was found
+      and fixed: every quote's ATR had been computed from <b>1-minute</b> bars since inception, so every "3× ATR
+      stop" was a ~1% hair-trigger, and the 1%-risk rule never once applied — <b>every R-multiple ever recorded
+      is void and the strategy sample resets to zero.</b> But the fix is now <b>verified against an independent
+      source</b>: TradingView puts UNH's daily ATR(14) at 9.94; the bot's live stop implies ~10.3 — a 4% cross-vendor
+      agreement. For the first time since inception both limbs of the risk framework operate correctly and
+      simultaneously: xsectmom's three entries each risk <b>exactly 1% of equity</b> ($1,003 / $997 / $979), and
+      swing's UNH is <b>cap-bound at 9.7%</b> of equity. The machine that will finally test the strategies is
+      trustworthy. The strategies remain untested.</p>
+
+    <div class="lr-stats">
+      <div class="lr-stat"><div class="k">Equity</div><div class="v">≈$97,415</div><div class="s">Jul 17 close</div></div>
+      <div class="lr-stat"><div class="k">P&amp;L inception</div><div class="v lr-dn">≈−$2,585</div><div class="s">−2.6% of $100k</div></div>
+      <div class="lr-stat"><div class="k">Books vs equity</div><div class="v lr-up">~$18</div><div class="s">Jul 14 · was $755 Jul 10</div></div>
+      <div class="lr-stat"><div class="k">Valid sample</div><div class="v lr-dn">0</div><div class="s">R-multiples reset Jul 15</div></div>
+      <div class="lr-stat"><div class="k">Risk per trade</div><div class="v lr-up">1.00%</div><div class="s">verified · was $80–133</div></div>
+      <div class="lr-stat"><div class="k">Worst day</div><div class="v lr-dn">−0.44%</div><div class="s">Jul 9 · 17% of loss limit</div></div>
+    </div>
+
+    <div class="fig">
+      <svg viewBox="0 0 1040 400" role="img" aria-label="Line chart: bot equity vs SPY over six sessions, indexed to 100 at July 3. SPY climbs to 101.36 by July 10; the bot dips to 99.69 on July 6 with three crash markers, recovers, then declines to about 99.22 by Friday afternoon, where a swing position rides into the weekend.">
+        <g stroke="var(--line)" stroke-width="1">
+          <line x1="70" y1="30"  x2="1000" y2="30"/>
+          <line x1="70" y1="90"  x2="1000" y2="90"/>
+          <line x1="70" y1="150" x2="1000" y2="150"/>
+          <line x1="70" y1="210" x2="1000" y2="210"/>
+          <line x1="70" y1="270" x2="1000" y2="270"/>
+          <line x1="70" y1="330" x2="1000" y2="330"/>
+        </g>
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--txt-dim)">
+          <text x="62" y="34"  text-anchor="end">101.5</text>
+          <text x="62" y="94"  text-anchor="end">101.0</text>
+          <text x="62" y="154" text-anchor="end">100.5</text>
+          <text x="62" y="214" text-anchor="end">100.0</text>
+          <text x="62" y="274" text-anchor="end">99.5</text>
+          <text x="62" y="334" text-anchor="end">99.0</text>
+          <text x="80"  y="358" text-anchor="middle">Jul 3</text>
+          <text x="256" y="358" text-anchor="middle">Jul 6</text>
+          <text x="432" y="358" text-anchor="middle">Jul 7</text>
+          <text x="608" y="358" text-anchor="middle">Jul 8</text>
+          <text x="784" y="358" text-anchor="middle">Jul 9</text>
+          <text x="960" y="358" text-anchor="middle">Jul 10*</text>
+        </g>
+        <polyline points="80,210 256,105 432,149 608,200 784,98 960,47" fill="none"
+          stroke="var(--pro)" stroke-width="2.5" stroke-dasharray="7 6"
+          stroke-linejoin="round" stroke-linecap="round"/>
+        <g fill="var(--pro)">
+          <circle cx="80" cy="210" r="4"/><circle cx="256" cy="105" r="4"/>
+          <circle cx="432" cy="149" r="4"/><circle cx="608" cy="200" r="4"/>
+          <circle cx="784" cy="98" r="4"/><circle cx="960" cy="47" r="4"/>
+        </g>
+        <text x="968" y="41" font-family="IBM Plex Mono" font-size="12" fill="var(--pro)">SPY 101.36</text>
+        <polyline points="80,210 256,247 432,207 608,223 784,275 960,304" fill="none"
+          stroke="var(--you)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="80" cy="210" r="4.5" fill="var(--you)"/>
+        <circle cx="256" cy="247" r="4.5" fill="var(--gap)"/>
+        <circle cx="432" cy="207" r="4.5" fill="var(--good)"/>
+        <circle cx="608" cy="223" r="4.5" fill="var(--you)"/>
+        <circle cx="784" cy="275" r="4.5" fill="var(--gap)"/>
+        <circle cx="960" cy="304" r="4.5" fill="var(--you)"/>
+        <text x="968" y="312" font-family="IBM Plex Mono" font-size="12" fill="var(--you)">BOT 99.22*</text>
+        <g font-family="IBM Plex Mono, monospace" font-size="12" fill="var(--gap)">
+          <text x="196" y="214" font-weight="600">✕✕✕</text>
+          <text x="90" y="200">3 crashes · TSLA ×3 lots</text>
+        </g>
+        <g font-family="IBM Plex Mono, monospace" font-size="11.5" fill="var(--part)">
+          <text x="784" y="298" text-anchor="middle">forced rotation</text>
+          <text x="784" y="312" text-anchor="middle">on 2/63 ranking</text>
+        </g>
+        <g font-family="IBM Plex Mono, monospace" font-size="11.5" fill="var(--good)">
+          <text x="952" y="264" text-anchor="end">outage held · +$815 rotation ·</text>
+          <text x="952" y="278" text-anchor="end">swing rides the weekend ○</text>
+        </g>
+        <circle cx="960" cy="304" r="8" fill="none" stroke="var(--good)" stroke-width="1.5"/>
+      </svg>
+      <div class="figcap">Equity vs SPY, indexed to 100 at Jul 3 close · solid cyan = bot (broker equity feed) ·
+        dashed = SPY close-to-close · ✕ = process crash · ○ = swing position, held over the weekend ·
+        Jul 10 bot point is the last intraday observation (1:57 PM ET)</div>
+    </div>
+
+    <table class="matrix">
+      <thead><tr>
+        <th>Session</th><th class="r">Open</th><th class="r">Close</th>
+        <th class="r">Day P&amp;L</th><th class="r">Realized recorded</th><th>Notes</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">Mon Jul 6</td>
+          <td class="r">99,646.67</td>
+          <td class="r">99,337.86</td>
+          <td class="r" style="color:var(--gap)">−308.81 · −0.31%</td>
+          <td class="r" style="color:var(--gap)">$0.00 — bug</td>
+          <td>Old build. 4 untracked positions; Finnhub 502s → 3 crashes in 13 min; TSLA ×3 lots (72 shs);
+            99 shares orphaned overnight. Daily report claimed "0 trades."<span class="note">Day P&amp;L is
+            broker-derived and trusted; trade-level detail is not.</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Tue Jul 7</td>
+          <td class="r">99,337.86</td>
+          <td class="r">99,674.90</td>
+          <td class="r" style="color:var(--good)">+337.04 · +0.34%</td>
+          <td class="r" style="color:var(--gap)">−572.02 intraday</td>
+          <td>Patched build from 16:48Z. Orphans cleared; realized loss includes unwinding Jul 6 leftovers,
+            offset by recovered marks. 0 restarts, 0 errors, flat at close, 23% of daily loss limit used.</td>
+        </tr>
+        <tr>
+          <td class="mono">Wed Jul 8</td>
+          <td class="r">99,674.90</td>
+          <td class="r">99,542.48</td>
+          <td class="r" style="color:var(--gap)">−132.42 · −0.13%</td>
+          <td class="r" style="color:var(--gap)">−309.06 intraday</td>
+          <td>Morning: Finnhub 502 emergency replayed Jul 6's failure — handled in one clean flatten, zero
+            crashes. Midday: strategy refocus deployed (intraday benched). Uptime record: 10,000+ cycles.</td>
+        </tr>
+        <tr>
+          <td class="mono">Thu Jul 9</td>
+          <td class="r">99,542.48</td>
+          <td class="r">99,108.07</td>
+          <td class="r" style="color:var(--gap)">−434.41 · −0.44%</td>
+          <td class="r" style="color:var(--good)">+9.90 (broker fills)</td>
+          <td>Four mid-session deploys → 429 burst → quote breaker open → 15:03 rotation ranked 2/63 names
+            and force-exited ARM/INTC/MU (net +$9.90 by actual fills; the bot's counter said −$99 —
+            quote-vs-fill gap). First swing signal fired and filled (n=1, held overnight). ~$430 of the day's
+            loss is unattributed in the bot's books — suspected unreported unrealized on the swing position
+            plus entry-side slippage; reconciling against Alpaca.<span class="note">Same-day fixes shipped:
+            degraded-data coverage guard, rotation atomicity, persistent gate.</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Fri Jul 10</td>
+          <td class="r">99,108.07</td>
+          <td class="r">≈98,867*</td>
+          <td class="r" style="color:var(--gap)">≈−241 · −0.24%*</td>
+          <td class="r">+514.37 (bot books)</td>
+          <td>First clean 10:00 ET rotation: xsectmom +$815 recorded, exited via take-profit legs by 1:35 PM
+            (design tension noted — a momentum book auto-selling its winners at 2R). Jul 9's swing position
+            stopped −$300.67, solving that day's attribution gap; swing re-entered META, held into the
+            weekend. 17:43 feed outage: breaker → held through → clean recovery in 307s. Books say +$514,
+            equity says −$241 — the ~$755 gap is entry-side slippage; fill patch shipped for the weekend
+            deploy.<span class="note">*last observation 1:57 PM ET; official close reconciles at Monday's
+            boot.</span></td>
+        </tr>
+        <tr>
+          <td class="mono"><b>Week 1</b></td>
+          <td class="r">100,000.00</td>
+          <td class="r"><b>≈98,867</b></td>
+          <td class="r" style="color:var(--gap)"><b>≈−1,133 · −1.13%</b></td>
+          <td class="r">—</td>
+          <td>Incl. −$353.33 pre-record. Drawdown remains incident-attributed; strategy sample: swing n=2,
+            one xsect rotation, meanrev n=0.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table class="matrix">
+      <thead><tr><th>Reliability metric</th><th class="r">Jul 6 (old build)</th><th class="r">Jul 7 (patched)</th></tr></thead>
+      <tbody>
+        <tr><td>Process crashes / restarts</td><td class="r" style="color:var(--gap)">3</td><td class="r" style="color:var(--good)">0</td></tr>
+        <tr><td>Unhandled API exceptions</td><td class="r" style="color:var(--gap)">3 fatal</td><td class="r" style="color:var(--good)">0</td></tr>
+        <tr><td>Duplicate orders</td><td class="r" style="color:var(--gap)">TSLA ×3 lots</td><td class="r" style="color:var(--good)">0</td></tr>
+        <tr><td>Orphaned shares overnight</td><td class="r" style="color:var(--gap)">99</td><td class="r" style="color:var(--good)">0</td></tr>
+        <tr><td>Flatten log spam (after close)</td><td class="r" style="color:var(--gap)">~100 in 15 min</td><td class="r" style="color:var(--good)">0</td></tr>
+        <tr><td>Finnhub 429 rate-limits</td><td class="r" style="color:var(--gap)">yes</td><td class="r" style="color:var(--good)">none</td></tr>
+        <tr><td>Realized P&amp;L recorded</td><td class="r" style="color:var(--gap)">no</td><td class="r" style="color:var(--good)">yes · −572.02</td></tr>
+        <tr><td>Continuous cycles (max)</td><td class="r">781</td><td class="r" style="color:var(--good)">1,782+</td></tr>
+      </tbody>
+    </table>
+
+    <table class="matrix">
+      <thead><tr><th>Same stimulus, three responses — Finnhub outage mid-session, positions open</th>
+        <th class="r">Outcome</th></tr></thead>
+      <tbody>
+        <tr><td><span class="mono">Jul 6</span> · old build</td>
+          <td class="r" style="color:var(--gap)">3 crashes · TSLA ×3 lots · 99 shares orphaned</td></tr>
+        <tr><td><span class="mono">Jul 9</span> · gate live, guards not yet</td>
+          <td class="r" style="color:var(--gap)">forced rotation on 2/63 ranking · book liquidated</td></tr>
+        <tr><td><span class="mono">Jul 10</span> · full guard set</td>
+          <td class="r" style="color:var(--good)">position held on broker-side stop · recovery in 307s · non-event</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn"><b>Provenance, before trusting any cell:</b> Jul 6 realized P&amp;L was never
+      recorded (record_close bypassed on failed exits — since fixed), so that day rests on the broker equity
+      feed. Jul 7 intraday detail was lost to the 16:48Z log purge; the session is reconstructed from the
+      post-close window and equity feed — the volume-backed audit trail prevents this loss going forward.
+      SPY closes (Jul 6: 751.28 +0.87% · Jul 7: 748.55 −0.36%) from public market data retrieved Jul 7;
+      Jul 3 close derived from Jul 6's reported change. Two sessions is noise: −48 bps vs SPY has no
+      statistical meaning at n=2. Only the intraday system has traded; swing, meanrev, and xsectmom
+      remain at zero signals. Paper account throughout.</div>
+  </section>
+
+  <!-- DIAGRAM: TUNING LOOP -->
+  <section>
+    <div class="ey">DIAGRAM 1 · THE PHASE YOU'RE IN</div>
+    <h2>The live-tuning loop — two turns complete</h2>
+    <div class="fig">
+      <svg viewBox="0 0 920 220" role="img" aria-label="Loop: live paper session, analyze logs, find divergence, fix and test, redeploy, repeat — two turns completed">
+        <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9z" fill="#647A91"/></marker></defs>
+        <style>
+          .bx{fill:#1B2836;stroke:#28384A;stroke-width:1.5}
+          .lb{fill:#DCE6F0;font-family:'IBM Plex Sans',sans-serif;font-size:13px;font-weight:600}
+          .sm{fill:#8FA3B8;font-family:'IBM Plex Mono',monospace;font-size:10.5px}
+          .ln{stroke:#647A91;stroke-width:1.6;fill:none}
+        </style>
+        <rect class="bx" x="30"  y="70" width="150" height="66" rx="10" style="stroke:#3FA7B8"/>
+        <text class="lb" x="46" y="98">Paper session</text><text class="sm" x="46" y="116">real market data</text>
+        <rect class="bx" x="220" y="70" width="150" height="66" rx="10"/>
+        <text class="lb" x="236" y="98">Analyze logs</text><text class="sm" x="236" y="116">signals · R-multiples</text>
+        <rect class="bx" x="410" y="70" width="150" height="66" rx="10" style="stroke:#D9684C"/>
+        <text class="lb" x="426" y="98">Find divergence</text><text class="sm" x="426" y="116">design vs reality</text>
+        <rect class="bx" x="600" y="70" width="150" height="66" rx="10" style="stroke:#3FB984"/>
+        <text class="lb" x="616" y="98">Fix + test</text><text class="sm" x="616" y="116">58/58 gate</text>
+        <rect class="bx" x="790" y="70" width="110" height="66" rx="10"/>
+        <text class="lb" x="806" y="98">Redeploy</text><text class="sm" x="806" y="116">confirmed ✓</text>
+        <path class="ln" d="M180 103 H216" marker-end="url(#ah)"/>
+        <path class="ln" d="M370 103 H406" marker-end="url(#ah)"/>
+        <path class="ln" d="M560 103 H596" marker-end="url(#ah)"/>
+        <path class="ln" d="M750 103 H786" marker-end="url(#ah)"/>
+        <path class="ln" d="M845 136 V180 H105 V140" marker-end="url(#ah)"/>
+        <text class="sm" x="300" y="205" fill="#647A91">turn 1: sizing · stops · liquidity &nbsp;&nbsp;|&nbsp;&nbsp; turn 2: loss-scaling · trail · rebalance — both deployed</text>
+      </svg>
+      <div class="figcap">Each turn makes the data more honest. The next session runs the fully coherent
+        model from the open — the first data that counts.</div>
+    </div>
+  </section>
+
+  <!-- DIAGRAM: ROAD -->
+  <section>
+    <div class="ey">DIAGRAM 2 · WHERE YOU ACTUALLY ARE</div>
+    <h2>The road to real money</h2>
+    <div class="fig">
+      <svg viewBox="0 0 920 200" role="img" aria-label="Track: machine and toolkit built (done), live tuning (current, two turns done), validation, out-of-sample holds, pre-live hardening, gate, real money">
+        <style>
+          .trk{stroke:#28384A;stroke-width:3}
+          .node{font-family:'IBM Plex Sans',sans-serif;font-size:12px;font-weight:600}
+          .ncap{font-family:'IBM Plex Mono',monospace;font-size:9.5px;fill:#647A91}
+        </style>
+        <line class="trk" x1="46" y1="80" x2="874" y2="80"/>
+        <circle cx="72" cy="80" r="12" fill="#3FB984"/><path d="M66 80l4 4 8-9" stroke="#0F1620" stroke-width="2.2" fill="none"/>
+        <text class="node" x="72" y="118" text-anchor="middle" fill="#3FB984">Machine</text>
+        <circle cx="188" cy="80" r="12" fill="#3FB984"/><path d="M182 80l4 4 8-9" stroke="#0F1620" stroke-width="2.2" fill="none"/>
+        <text class="node" x="188" y="118" text-anchor="middle" fill="#3FB984">Toolkit</text>
+        <circle cx="326" cy="80" r="14" fill="#3FA7B8"/><circle cx="326" cy="80" r="22" fill="none" stroke="#3FA7B8" stroke-width="1.5" opacity="0.5"/>
+        <text class="node" x="326" y="118" text-anchor="middle" fill="#3FA7B8">Live tuning</text>
+        <text class="ncap" x="326" y="135" text-anchor="middle">YOU ARE HERE · first real trades · config coherent</text>
+        <circle cx="480" cy="80" r="11" fill="#1B2836" stroke="#647A91" stroke-width="2"/>
+        <text class="node" x="480" y="118" text-anchor="middle" fill="#8FA3B8">Validation</text>
+        <text class="ncap" x="480" y="135" text-anchor="middle">backtest + paper</text>
+        <circle cx="614" cy="80" r="11" fill="#1B2836" stroke="#647A91" stroke-width="2"/>
+        <text class="node" x="614" y="118" text-anchor="middle" fill="#8FA3B8">OOS holds</text>
+        <circle cx="716" cy="80" r="11" fill="#1B2836" stroke="#647A91" stroke-width="2"/>
+        <text class="node" x="716" y="118" text-anchor="middle" fill="#8FA3B8">Pre-live</text>
+        <rect x="782" y="58" width="42" height="44" rx="7" fill="#1B2836" stroke="#D9684C" stroke-width="2"/>
+        <path d="M795 78v-6a8 8 0 0116 0v6" fill="none" stroke="#D9684C" stroke-width="2"/>
+        <rect x="792" y="78" width="22" height="15" rx="2" fill="#D9684C"/>
+        <text class="node" x="803" y="118" text-anchor="middle" fill="#D9684C">GATE</text>
+        <text x="862" y="86" text-anchor="middle" font-size="20">💰</text>
+        <text class="node" x="862" y="118" text-anchor="middle" fill="#8FA3B8">Real $</text>
+      </svg>
+      <div class="figcap">Only post-fix data counts toward validation. Pre-fix sessions were measuring
+        artifacts of a distorted model.</div>
+    </div>
+  </section>
+
+  <!-- SUMMARY -->
+  <section>
+    <div class="ey">SUMMARY</div>
+    <h2>The headline</h2>
+    <div class="verdicts">
+      <div class="vc you"><div class="who">Your system</div><h3>Coherent and honest — finally measurable</h3>
+        <p>Four strategies, bracket execution, full analysis stack, and a config where every knob scales
+          correctly and works at the right magnitude. From the next session, the data measures the
+          strategy — not artifacts. Edge: still unmeasured.</p></div>
+      <div class="vc retail"><div class="who">Successful retail</div><h3>Validated, simpler</h3>
+        <p>Rougher code, proven edge. Every one of them went through exactly this tuning phase — what made
+          them successful was finishing it with a validated strategy.</p></div>
+      <div class="vc pro"><div class="who">Pro desk</div><h3>Redundant &amp; durable</h3>
+        <p>Multi-vendor data, smart routing, portfolio governors, durable state. The aspiration, not
+          today's requirement.</p></div>
+    </div>
+  </section>
+
+  <!-- MATRIX -->
+  <section>
+    <div class="ey">SIDE BY SIDE</div>
+    <h2>The comparison matrix</h2>
+    <p class="soft">Updated for both fix rounds. Strategy edge excluded by design.</p>
+    <table class="matrix">
+      <thead><tr><th>Dimension</th><th>Your Agentic Trader</th><th>Successful retail</th><th>Pro desk</th></tr></thead>
+      <tbody>
+        <tr><td>Architecture</td><td><span class="rate r-good">STRONG</span><span class="note">Cleanly separated; N strategies plug in as systems.</span></td><td><span class="rate r-part">MIXED</span></td><td class="pro-col"><span class="rate r-good">RIGOROUS</span></td></tr>
+        <tr><td>Position sizing</td><td><span class="rate r-good">FIXED</span><span class="note">Equity-scaled cap (10%); risk model no longer crushed.</span></td><td><span class="rate r-part">VARIES</span></td><td class="pro-col"><span class="rate r-good">DYNAMIC</span></td></tr>
+        <tr><td>Stops &amp; trailing</td><td><span class="rate r-good">FIXED + COHERENT</span><span class="note">2.5× ATR initial; 1% trail now on the same scale and actually engages.</span></td><td><span class="rate r-part">VARIES</span></td><td class="pro-col"><span class="rate r-good">REGIME-AWARE</span></td></tr>
+        <tr><td>Loss governor</td><td><span class="rate r-good">FIXED TODAY</span><span class="note">Daily halt = 2.5% of equity, read dynamically; stale env override removed.</span></td><td><span class="rate r-part">RARE</span></td><td class="pro-col"><span class="rate r-good">MULTI-LAYER</span></td></tr>
+        <tr><td>Market calendar</td><td><span class="rate r-good">FIXED TODAY</span><span class="note">Rule-based NYSE holidays + 13:00 early closes; flatten keys off the true close. Found live on Jul 3.</span></td><td><span class="rate r-part">OFTEN MISSED</span></td><td class="pro-col"><span class="rate r-good">EXCHANGE FEEDS</span></td></tr>
+        <tr><td>Rebalance discipline</td><td><span class="rate r-good">FIXED TODAY</span><span class="note">Cross-sectional ~daily live, weekly in backtest — no more 25-min ranking churn.</span></td><td><span class="rate r-part">VARIES</span></td><td class="pro-col"><span class="rate r-good">SCHEDULED</span></td></tr>
+        <tr><td>Liquidity filtering</td><td><span class="rate r-good">FIXED</span><span class="note">Daily-volume basis; ~390× unit bug removed.</span></td><td><span class="rate r-part">BASIC</span></td><td class="pro-col"><span class="rate r-good">DEPTH-AWARE</span></td></tr>
+        <tr><td>Order execution</td><td><span class="rate r-good">PROVEN LIVE</span><span class="note">Bracket orders confirmed on Alpaca paper: broker-side stop + target.</span></td><td><span class="rate r-part">LIMIT/BRACKET</span></td><td class="pro-col"><span class="rate r-good">SMART ROUTING</span></td></tr>
+        <tr><td>Trade recording + analytics</td><td><span class="rate r-good">PRODUCING</span><span class="note">TradeRecords with R-multiples; MC + correlation ready, awaiting 30+ honest trades.</span></td><td><span class="rate r-part">VARIES</span></td><td class="pro-col"><span class="rate r-good">FULL AUDIT</span></td></tr>
+        <tr><td>Backtest harness</td><td><span class="rate r-part">BUILT, NOT RUN</span><span class="note">No-lookahead + IS/OOS split ready; still not run on real history. Top of roadmap.</span></td><td><span class="rate r-good">EXTENSIVE</span></td><td class="pro-col"><span class="rate r-good">EXHAUSTIVE</span></td></tr>
+        <tr><td>State / crash recovery</td><td><span class="rate r-gap">GAP — DEMONSTRATED LIVE</span><span class="note">Mid-day redeploy killed the container; empty book + holiday = lucky. No market-hours redeploys until reconcile-on-boot is built.</span></td><td><span class="rate r-part">PERSISTED</span></td><td class="pro-col"><span class="rate r-good">DURABLE</span></td></tr>
+        <tr><td>Universe breadth</td><td><span class="rate r-good">WIDENED</span><span class="note">63 names / 14 sectors, 12-name intraday subset; tiered scanning keeps calls at ~52/min (~3x headroom); budget locked by a test.</span></td><td><span class="rate r-part">VARIES</span></td><td class="pro-col"><span class="rate r-good">BROAD</span></td></tr>
+        <tr><td>Deploy discipline</td><td><span class="rate r-good">STRONG</span><span class="note">39-test gate, env secrets, four-switch live gate, deploy-confirm workflow.</span></td><td><span class="rate r-part">VARIES</span></td><td class="pro-col"><span class="rate r-good">CI/CD</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- STRATEGY SHELF (rev 8) -->
+  <section>
+    <div class="ey">NEW · STRATEGY SHELF · CURRENT BOOK VS THE FIELD</div>
+    <h2>Where each system sits in the competitive landscape</h2>
+    <p class="soft">Written down now, before the P&amp;L has an opinion. Each live system is mapped to its
+      professional and retail equivalents, with the evidence bar it must clear to stay in the book. The
+      companion table lists credible strategies deliberately <i>not</i> in the stack and what would trigger
+      adopting one. The null hypothesis throughout: buy-and-hold SPY, which costs nothing to run and is
+      currently ahead.</p>
+
+    <table class="matrix">
+      <thead><tr>
+        <th>Live system</th><th>Edge hypothesis</th><th>Who else runs this</th>
+        <th>Evidence base</th><th>Bar to keep it</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono"><b>intraday</b><span class="note">12 liquid names · 1-min opening-range break above VWAP, 1.3× vol · 1% trail · max 4 positions · EOD flat</span></td>
+          <td>Momentum ignition persists minutes-to-hours after a confirmed range break on volume.</td>
+          <td>Classic retail day-trading playbook; prop desks run the same idea with speed and rebates this
+            stack cannot match.</td>
+          <td><span class="rate r-part">MIXED</span><span class="note">Thin academic support for ORB;
+            edge is cost-sensitive — slippage at 1-min decides it.</span></td>
+          <td><span class="rate r-gap">BENCHED · JUL 8 2026</span><span class="note">Operator decision, taken before the 50-trade bar — grounds were operational, not statistical: thinnest evidence base on the shelf, highest cost sensitivity, sole source of both feed-outage emergencies, and majority of the API budget. Return path: positive backtest over ≥1yr of 1-min data + a redundant quote source. Code retained; re-enable via <span class="mono">ENABLED_SYSTEMS</span>.</span></td>
+        </tr>
+        <tr>
+          <td class="mono"><b>swing</b><span class="note">all 63 names · 20-day-high breakout, price &gt; 50-SMA, 1.3× vol · max 4 positions · holds overnight</span></td>
+          <td>Trends in daily structure persist longer than the market prices in.</td>
+          <td>Managed-futures CTAs (across asset classes, with decades of results); retail breakout traders
+            on single names.</td>
+          <td><span class="rate r-good">STRONG*</span><span class="note">*for diversified multi-asset trend;
+            single-name equity trend is a weaker cousin of momentum.</span></td>
+          <td>Positive expectancy over ≥30 trades; time-in-market drawdown inside the 2.5% daily / equity
+            caps. <b>Sample VOID as of Jul 15</b> — all prior trades ran on ~1% stops (scar ⑥), so their
+            R-multiples measure a bug, not the strategy. Valid n=0; the 30-trade count restarts at the fix.</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>meanrev</b><span class="note">all 63 names · RSI &lt; 30 with price &gt; 200-SMA · 2.0× ATR stop · max 4 positions</span></td>
+          <td>Short-horizon overreaction reverts within days.</td>
+          <td>Stat-arb desks — but hedged and market-neutral. Unhedged single-name reversion is the retail
+            version and carries falling-knife tail risk.</td>
+          <td><span class="rate r-part">DOCUMENTED</span><span class="note">Short-term reversal is a known
+            effect; capturing it net of costs, unhedged, is the hard part.</span></td>
+          <td>Win rate alone is not enough — tail control is the test: no single loss &gt; 1.5R over ≥30
+            trades. Zero signals so far.</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>xsectmom</b><span class="note">all 63 names · 126-day momentum, hold top 3 · daily rebalance · 3.0× ATR stop</span></td>
+          <td>Relative winners over the ranking window keep outperforming relative losers.</td>
+          <td>The most-published factor in finance; institutional factor funds run it market-neutral across
+            hundreds of names. 63 long-only names is a concentrated retail expression of it.</td>
+          <td><span class="rate r-good">STRONG</span><span class="note">Deep academic literature — and
+            well-documented crash risk when momentum reverses sharply.</span></td>
+          <td>Judge vs two benchmarks, not one: must beat both SPY and an equal-weight basket of its own
+            universe, else it's just beta. <b>Sample VOID as of Jul 15</b> (scar ⑥: ~1% stops made every rotation a whipsaw —
+            Jul 15 went 0/3 in under 11 minutes). Now stop-only with correct daily-ATR stops; valid n=0.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table class="matrix">
+      <thead><tr>
+        <th>Not in the stack</th><th>What it is</th><th>Why it's out (for now)</th><th>Adoption trigger</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">SPY buy-and-hold</td>
+          <td>The passive benchmark. Zero infrastructure, zero decisions.</td>
+          <td>It's not out — it's the null hypothesis every system above must beat net of costs.</td>
+          <td>Already the yardstick in the scoreboard; stays the yardstick.</td>
+        </tr>
+        <tr>
+          <td class="mono">overnight drift</td>
+          <td>Hold close-to-open; a large share of long-run equity returns has historically accrued
+            overnight.</td>
+          <td>Not evaluated yet — but it's the natural complement to a book that flattens intraday at every
+            close.</td>
+          <td>Cheapest experiment on the shelf: existing feed + broker already suffice. Candidate for a
+            paper-only fifth system after the backtest harness lands.</td>
+        </tr>
+        <tr>
+          <td class="mono">pairs / stat-arb</td>
+          <td>Long-short related names; profit from spread convergence, market-neutral.</td>
+          <td>Needs shorting, borrow costs, and co-integration tooling the stack doesn't have.</td>
+          <td>If live results show the directional books are mostly repackaged SPY beta, neutralizing it is
+            the answer — revisit then.</td>
+        </tr>
+        <tr>
+          <td class="mono">volatility premium</td>
+          <td>Systematic option selling (covered calls, cash-secured puts) harvesting the implied-realized
+            gap.</td>
+          <td>Different asset class: options approval, Greeks risk, and a tail profile that punishes exactly
+            the operational immaturity Jul 6 demonstrated.</td>
+          <td>Not before months of clean equity-side operation and a tested risk layer for defined-risk
+            structures only.</td>
+        </tr>
+        <tr>
+          <td class="mono">ML / factor blend</td>
+          <td>Learned signals over engineered features.</td>
+          <td>Needs far more data than two sessions and a working backtest harness to avoid fitting noise.</td>
+          <td>Only after the four rule-based systems have verdicts — a model can't be validated against a
+            pipeline that hasn't validated anything simpler.</td>
+        </tr>
+        <tr>
+          <td class="mono">market making / HFT</td>
+          <td>Earning the spread with speed and rebates.</td>
+          <td>Structurally out of reach: co-location, latency, and rebate economics. Listed to be explicit
+            that this stack should never drift toward competing on speed.</td>
+          <td>None.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout"><b>The maintain-or-change rule, agreed in advance:</b> no verdict on any system
+      before <b>30 closed trades</b> (50 for intraday, where costs bite hardest) — R-multiples from
+      trades.jsonl, not day P&amp;L, are the unit of account. <b>Maintain</b> if expectancy &gt; 0R net of
+      costs and drawdown stays inside the risk caps. <b>Tune</b> (thresholds only, one change at a time)
+      if expectancy is ≈0R with a sane win/loss shape. <b>Retire</b> only when live expectancy is negative
+      after the minimum sample <i>and</i> the backtest agrees — one bad live month against a positive
+      backtest is variance; both negative is a verdict. And the standing test for the whole book: rolling
+      correlation to SPY. If the book just tracks the index, the strategies are decoration on beta, and
+      SPY buy-and-hold wins on cost.
+      <br><br><b>Decisions taken under this rule:</b> <span class="mono">Jul 8 2026</span> — intraday benched (operational grounds, documented above; the framework's statistical bar was explicitly not the basis). Book re-focused on swing + xsectmom, with meanrev retained at lesser weight — it scans all 63 names but its falling-knife tail risk on the thin emerging-tech sleeve argues for smaller sizing until it has a sample. Live profile: <span class="mono">ENABLED_SYSTEMS=swing,xsectmom,meanrev</span>. <span class="mono">Jul 8 PM</span> — first three-book session: zero signals across all three. Per the framework, thresholds were NOT touched; plumbing verification shipped instead (funnel logging, bar-depth guard, wall-clock rebalance). Zero signals from a verified-healthy scanner is information; zero signals from a starved one is a bug — as of this revision we cannot yet tell which, and the next boot log will.
+      <br><br><span class="mono">Jul 9 AM</span> — the plumbing question ANSWERED: three stacked bugs
+      (cycle-count rebalance cadence, 390× liquidity unit error, daily-candle window shorter than the
+      200-SMA / 126d lookbacks). All fixed; funnels confirm bars_ok=63/63. The strategies were starved,
+      not too strict — vindicating the no-loosening call.
+      <br><br><span class="mono">Jul 9 PM</span> — forced-rotation incident: four mid-session deploys
+      caused a 429 burst, the quote breaker opened, and the rebalance traded a "top 3" ranked from 2/63
+      names, force-exiting ARM/INTC/MU. Fixes shipped same day: minimum-coverage guard (a blind ranking
+      may not trade), rotation atomicity (no exits when entries are blocked; stop-losses stay ungated),
+      gate state persisted across redeploys. <b>Ops rule adopted: no deployments during market hours</b>
+      unless something is actively losing money. Open items: buy-side entry-fill accuracy;
+      unrealized-display reconciliation vs Alpaca (Jul 9 closed with ~$430 unattributed).
+      <br><br><span class="mono">Jul 10</span> — the outage arc completed (see table above). Jul 9's
+      attribution mystery resolved: the swing position realized −$300.67 at its stop. A SECOND attribution
+      gap appeared (~$755: books +$514 vs equity −$241) confirming entry-side slippage as systematic;
+      the entry-fill patch and a persistent position registry (multi-day holds reconcile at boot without
+      order-scan dependence) shipped for weekend deploy. Railway misattributed the weekend-held META swing
+      position to the benched intraday book and proposed boot-time auto-liquidation — rejected: the
+      proposed code compared enums to strings (would flatten the ENTIRE book every boot), and silent
+      liquidation of unattributed holdings is the failure class this week was spent eliminating.
+      STRATEGY_REFERENCE.md published to docs/ as ground truth. <b>Jul 14 — DECIDED:</b> xsectmom moved to
+      stop-only (OTO) brackets. Three rotations running (Jul 10/13/14) the 2R take-profit legs sold the
+      strongest names by midday and left the momentum book in cash on rising tape — a relative-strength
+      strategy amputating exactly the right tail it exists to capture. It now exits only on rank rotation or
+      the protective stop; swing/meanrev keep their targets (env-overridable per system). This is an
+      intervention, not a fix: R-multiples before and after this line are two samples. The bet — that riding
+      winners beats the 2R hit-rate given up — will be settled by the trades, not asserted here.
+      <br><br><span class="mono">Jul 11 (Sat)</span> — weekend hardening. The registry's first contact with
+      reality found a provenance bug: the order scan let the OLDEST order win (Alpaca returns newest-first),
+      attributed the weekend META swing position to Jul 8's benched intraday ghost, cached the wrong answer
+      into the brand-new registry, and boot-looped the service every ~2s. <b>The halt contained it
+      perfectly</b> — hundreds of boots, zero orders placed. Fixes deployed and verified same day:
+      newest-order-wins, registry self-heal on evidence conflict, gentle halts (10-min backoff, ends the
+      ntfy storm). The working system then exposed two latent bugs only a working system could: <b>DAY-tif
+      bracket legs expire at every close</b> — the entire multi-day book was holding overnight with NO live
+      broker stops, contradicting the strategy reference — fixed with GTC brackets for swing/meanrev/xsectmom
+      (manual GTC stops placed for the two existing weekend holds); and the boot bar-depth guard had never
+      actually run (len() on a Bars object raised on every boot) — fixed, and its first real verification
+      passed: median 343 bars, all three strategies fed. Funnel logging switched to emit-on-change
+      (11 duplicate lines/11 min → 1). All fixes production-verified before Sunday.
+      <br><br><span class="mono">Jul 13–14</span> — the accounting war ended. Entry-fill accuracy (buy()
+      books actual fills, slow fills corrected within a cycle, canceled entries drop their phantoms) plus
+      the persistent position registry brought the books-vs-equity gap from ~$755 (Jul 10) to ~$18 (Jul 14).
+      Two operational scars added: a mid-session config push with a malformed ntfy topic crashed the deploy
+      (Jul 13) — audit.py now accepts a token OR a full-URL topic and can never crash trading on a bad
+      mirror config, with a one-time "phone alerts DOWN" alarm; and a reminder that even env-only pushes
+      restart the process, so the no-mid-session-deploys rule covers config too. <b>Considered &amp;
+      declined:</b> extending xsectmom into after-hours trading — thin liquidity would tax the strategy's
+      slim edge, the daily-bar signal has nothing to say about the extended session, and scaling on one
+      week of data is exactly what the 30-trade rule forbids. The high-leverage move was stop-only brackets
+      (above), not more hours.
+      <br><br><span class="mono">Jul 15</span> — <b>the measurement itself was broken.</b> xsectmom's three
+      entries (MU/INTC/ARM) exited in under 11 minutes for −$342; the exits landed at <i>exactly</i>
+      entry − 3 × ATR where the implied ATR was 0.27–0.45% of price — i.e. 1-minute-bar ATR. Root cause in
+      feed_layer.get_quote: it computed every field from <span class="mono">intraday or daily</span> bars, so
+      q.atr — which every engine turns into a stop — carried 1-minute scale. Same unit-mismatch class as the
+      Jul 9 liquidity bug, same function, different field, live since inception. Consequences, all now
+      corrected: stops were ~1% not ~6%; position sizing was pinned to the 10% notional cap on every trade so
+      the 1%-risk rule never applied (real risk/trade ≈$80–133 vs ≈$975 intended); and <b>every R-multiple
+      logged to date is void</b>. Fixed by making the feed's scale contract explicit and repairing all three
+      daily strategies at the source. <b>Consequence for the Jul 14 bracket decision:</b> its evidence was
+      contaminated — the "book empties by midday" was tiny targets (2R ≈ 1–3% away), not the take-profit
+      concept. Stop-only is KEPT on its own strategy thesis (momentum should ride until it rotates out) and
+      remains env-reversible, but it is now an untested change on an untested sample. <b>The shelf's trade
+      counters reset here.</b> Two weeks of P&amp;L measured a bug; the strategies remain unjudged.
+      <br><br><span class="mono">Jul 16</span> — <b>the risk system verified; the bookkeeping caught lying.</b>
+      The ATR fix deployed overnight and worked: xsectmom's three entries each risked exactly 1% of equity
+      ($1,003 / $997 / $979 — previously $80–133), swing's UNH bound correctly against the 10% concentration
+      cap, and the stops were confirmed against TradingView (UNH daily ATR(14) = 9.94 vs the bot's implied
+      ~10.3, 4% cross-vendor agreement). MU's ~9.7%-of-price ATR is <b>real volatility</b>, not a data
+      artifact — MU fell 16.9% in five sessions; wide stops with small positions is ATR sizing correctly
+      de-risking a violent tape. <b>Analyst error, recorded:</b> the assistant first called those stops "5×
+      too wide" from an assumption about what a daily ATR should be, without the bar data — a hypothesis
+      stated as a finding, the exact anti-pattern this log exists to prevent. TradingView refuted it.
+      Separately, scar ⑦ (above): the day's reported +$742.62 / "75% win rate / STRONG" was entirely
+      fictional — the account was <i>down</i> $239.82 with all three positions still open. The equity line
+      was the only figure that never lied, as it has been all fortnight. <b>Structural note, not yet
+      actioned:</b> 1% risk × 3× ATR stops in a 10%-ATR regime deploys only ~10% of capital across three
+      positions. That is an honest consequence, not a bug — and a parameter question that waits behind the
+      backtest harness. Do not tune it at n=0 during a selloff.
+      <br><br><span class="mono">Jul 16 PM</span> — two failures, both procedural, both worth the ink.
+      <b>Scar ⑧ (above)</b> is the sharper lesson: the anatomy diagram drew "market calendar — no entries
+      outside 9:30–16:00 ET" as the top guardrail on the veto rail. <b>That guard did not exist in code.</b>
+      A diagram is not an implementation, and drawing a control does not create it — the doc asserted a
+      safety property the system never had, and only a rare condition (a post-close bar refresh producing a
+      signal) exposed it. Every other guard on that rail is now worth re-verifying against source, not
+      against this page. <b>Second, an assistant error:</b> the evening deploy failed outright — main.py was
+      being shipped from a base predating the ntfy work, so it silently reverted the notifier wiring the
+      engines had gained, and build() raised TypeError on the first engine. Two of the three active
+      strategies (swing_engine.py, meanrev_engine.py) had never once been read by the assistant. Railway's
+      proposed fix stripped the notifier parameter from three files while admitting it left xsection.py with
+      live self._notifier calls — an AttributeError scheduled for the next 10:00 ET rotation, i.e. a crash
+      after the exits and before the entries: the Jul 9 forced-liquidation shape. Rejected. Resolved instead
+      by making the notifier OPTIONAL (null-object default) with every notify_* call preserved and
+      xsection's notify sites restored. <b>Rule adopted: paste the file, or do not touch it.</b> No file gets
+      edited or shipped by any assistant that has not read it in full — that rule now applies equally to the
+      assistant that wrote it, which broke it on Jul 9 (rebuilding xsection.py from spec, unseen) and again
+      tonight.
+      <br><br><span class="mono">Jul 17</span> — <b>the worst assistant error of the run, and its
+      antidote.</b> Scar 9: a throwaway reconcile fallback (entry x 0.99) force-liquidated three positions
+      24 seconds after boot. Every guard built this fortnight — coverage, rotation atomicity, phantom-close —
+      exists to stop the machine from trading on incomplete information; this one made it do exactly that,
+      written by the same hand that built the guards and never tested against a position underwater at boot.
+      Cost: zero, by luck — the market was shut, the sells never filled, and the next reconcile erased the
+      fictional −$420.62. But the sell path had already CANCELLED the broker-side GTC legs before failing,
+      leaving three positions naked overnight: <b>a failed sell must not strand a position without
+      protection.</b> Scar 10 then closed the last unexplained defect: the stop-leg scan had never once
+      worked, and two of the assistant's own resilience features (registry, ATR self-heal) had been quietly
+      papering over it. <b>Resilience hides defects — that is its cost, and it is why masking is not
+      fixing.</b> <b>Credit where due:</b> Railway's assistant diagnosed scar 10 correctly ("stop creation
+      works, stop tracking is broken") before the assistant did — its first correct call in two weeks — while
+      simultaneously asserting, without checking the cancel lines in the log it was reading, that the stops
+      were "still live... not a risk issue". Both halves are the lesson: pattern-matching can beat analysis;
+      neither substitutes for verification. <b>The operator closed the book the same evening.</b> Judgment:
+      correct and unglamorous — ten scars in two weeks earns the right to stop and rebuild the sample from a
+      clean slate.
+      <br><br><span class="mono">Jul 17</span> — <b>the day the ledger stopped being the bot&#39;s word.</b> The
+      operator exported Alpaca&#39;s full order history to a spreadsheet, and it did in an afternoon what the bot&#39;s
+      own logs could not do in a fortnight: proved scar 6 from fill data (see the scar map), exposed scar 12
+      (duplicate entries), and corrected the assistant twice. <b>Method note:</b> the raw export DUPLICATED rows;
+      the assistant read that artifact as &quot;the bot double-bought every day for ten days&quot; and was seconds from
+      reporting it. What caught the error was the operator&#39;s two manual orders appearing twice — orders known to
+      have been placed once. <b>An unverified pattern is a hypothesis, not a finding</b> — stated to Railway for two
+      days, then broken by the one who stated it. <b>Second assistant error, worse:</b> told repeatedly to cancel a
+      MU stop as a &quot;naked short&quot;, on the operator&#39;s recollection of having sold the shares — while the order
+      history in hand showed no such sell. Reconcile later found MU x3 still held, stop 612.10 live and correct.
+      Cancelling it would have stranded a real position. <b>Rule extended: verify against the data, including when
+      the person you are helping tells you otherwise.</b> Same evening, brokers.py deployed and _walk_order proved
+      itself in production: PLD/UNP/ARM/MU adopted with real stop prices AND corrected quantities (130 and 96, vs
+      the 65 and 32 the books believed). UNH correctly reported stop-less — a working sensor reporting absence is
+      evidence of absence.</div>
+  </section>
+
+  <!-- SYSTEM ANATOMY (rev 14, scar map + trade lifecycle, rev 15 origin) -->
+  <section>
+    <div class="ey">NEW · SYSTEM ANATOMY · WHAT IT DOES, WHAT CONTROLS IT, WHAT TEACHES IT</div>
+    <h2>The bot, drawn whole</h2>
+    <p class="soft">Everything above describes incidents; this shows the machine. The center column is the
+      pipeline — sense, think, decide, act. The left rail is <b>what controls the bot</b>: every guard with
+      veto power over the pipeline, each one paid for by a specific incident this week. The right rail is
+      what it remembers across restarts. And the loop at the bottom is <b>what teaches it</b> — nothing
+      inside the bot learns or self-modifies; every behavior change is a human-reviewed code deploy,
+      governed by the maintain-or-change framework.</p>
+
+    <div class="fig">
+      <svg id="anat" viewBox="0 0 1040 780" role="img" aria-label="System anatomy diagram. Center pipeline: market data flows through the feed layer into the brain (two scanners and a ranker), through the signal router to three strategy engines, then to execution and the Alpaca broker. A left guardrail column can veto every stage: kill switch, circuit breakers, coverage guard, rotation atomicity, boot reconciliation halt, market calendar. A right memory rail persists positions, gate state, audit trail, and trade records. A bottom loop shows the teaching cycle: logs to human analysis under the decision framework, to code, to GitHub, to deploy, back to the bot.">
+        <defs>
+          <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--txt-dim)"/>
+          </marker>
+          <marker id="arG" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--gap)"/>
+          </marker>
+          <marker id="arP" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--part)"/>
+          </marker>
+        </defs>
+        <style>
+          #anat .bx{fill:var(--panel2);stroke:var(--line)}
+          #anat .lbl{font-family:'IBM Plex Mono',monospace;fill:var(--txt);font-size:12px;font-weight:600}
+          #anat .sub{font-family:'IBM Plex Mono',monospace;fill:var(--txt-dim);font-size:10.5px}
+          #anat .hd{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.12em}
+          #anat .fl{stroke:var(--txt-dim);stroke-width:1.6;fill:none;marker-end:url(#ar)}
+          #anat .veto{stroke:var(--gap);stroke-width:1.4;stroke-dasharray:4 4;fill:none;marker-end:url(#arG)}
+          #anat .mem{stroke:var(--good);stroke-width:1.2;stroke-dasharray:2 4;fill:none}
+          #anat .tch{stroke:var(--part);stroke-width:1.6;fill:none;marker-end:url(#arP)}
+        </style>
+
+        <!-- ================= CENTER PIPELINE ================= -->
+        <!-- SENSE -->
+        <rect class="bx" x="270" y="16" width="500" height="46" rx="10"/>
+        <text class="lbl" x="520" y="35" text-anchor="middle">MARKET DATA — Finnhub</text>
+        <text class="sub" x="520" y="51" text-anchor="middle">500-day dailies · 1-min bars (dormant) · quotes</text>
+        <line class="fl" x1="520" y1="62" x2="520" y2="84"/>
+
+        <rect class="bx" x="270" y="86" width="500" height="52" rx="10"/>
+        <text class="lbl" x="520" y="106" text-anchor="middle">FEED LAYER — the senses</text>
+        <text class="sub" x="520" y="122" text-anchor="middle">rate limiter 52/min · per-endpoint circuit breakers · tiered caches</text>
+        <line class="fl" x1="520" y1="138" x2="520" y2="160"/>
+
+        <!-- THINK -->
+        <rect x="258" y="160" width="524" height="122" rx="12" fill="none" stroke="var(--you)" stroke-width="1.5"/>
+        <text class="hd" x="520" y="177" text-anchor="middle" fill="var(--you)">THE BRAIN — rule-based, deterministic, no ML</text>
+        <rect class="bx" x="272" y="188" width="156" height="80" rx="8"/>
+        <text class="lbl" x="350" y="208" text-anchor="middle" font-size="11">swing scanner</text>
+        <text class="sub" x="350" y="224" text-anchor="middle">20d-high break</text>
+        <text class="sub" x="350" y="238" text-anchor="middle">&gt;50-SMA · 1.3× vol</text>
+        <text class="sub" x="350" y="256" text-anchor="middle" fill="var(--you)">funnel-logged</text>
+        <rect class="bx" x="442" y="188" width="156" height="80" rx="8"/>
+        <text class="lbl" x="520" y="208" text-anchor="middle" font-size="11">meanrev scanner</text>
+        <text class="sub" x="520" y="224" text-anchor="middle">RSI&lt;30 in uptrend</text>
+        <text class="sub" x="520" y="238" text-anchor="middle">&gt;200-SMA</text>
+        <text class="sub" x="520" y="256" text-anchor="middle" fill="var(--you)">funnel-logged</text>
+        <rect class="bx" x="612" y="188" width="156" height="80" rx="8"/>
+        <text class="lbl" x="690" y="208" text-anchor="middle" font-size="11">xsect ranker</text>
+        <text class="sub" x="690" y="224" text-anchor="middle">126d momentum</text>
+        <text class="sub" x="690" y="238" text-anchor="middle">top-3 · 10:00 ET gate</text>
+        <text class="sub" x="690" y="256" text-anchor="middle" fill="var(--you)">coverage-checked</text>
+        <line class="fl" x1="520" y1="282" x2="520" y2="302"/>
+
+        <rect class="bx" x="270" y="304" width="500" height="40" rx="10"/>
+        <text class="lbl" x="520" y="322" text-anchor="middle" font-size="11">SIGNAL ROUTER</text>
+        <text class="sub" x="520" y="336" text-anchor="middle">one source → one system · benched signals dropped, never crash</text>
+        <line class="fl" x1="520" y1="344" x2="520" y2="366"/>
+
+        <!-- DECIDE -->
+        <rect x="258" y="366" width="524" height="96" rx="12" fill="none" stroke="var(--you)" stroke-width="1.5"/>
+        <text class="hd" x="520" y="383" text-anchor="middle" fill="var(--you)">STRATEGY ENGINES — sizing &amp; risk per trade</text>
+        <rect class="bx" x="272" y="392" width="156" height="58" rx="8"/>
+        <text class="lbl" x="350" y="412" text-anchor="middle" font-size="11">swing</text>
+        <text class="sub" x="350" y="428" text-anchor="middle">1% risk · ATR stop</text>
+        <text class="sub" x="350" y="442" text-anchor="middle">holds days–weeks</text>
+        <rect class="bx" x="442" y="392" width="156" height="58" rx="8"/>
+        <text class="lbl" x="520" y="412" text-anchor="middle" font-size="11">meanrev</text>
+        <text class="sub" x="520" y="428" text-anchor="middle">2× ATR stop</text>
+        <text class="sub" x="520" y="442" text-anchor="middle">reduced weight</text>
+        <rect class="bx" x="612" y="392" width="156" height="58" rx="8"/>
+        <text class="lbl" x="690" y="412" text-anchor="middle" font-size="11">xsectmom</text>
+        <text class="sub" x="690" y="428" text-anchor="middle">3× ATR stop</text>
+        <text class="sub" x="690" y="442" text-anchor="middle">rotate daily</text>
+        <line class="fl" x1="520" y1="462" x2="520" y2="484"/>
+
+        <!-- ACT -->
+        <rect class="bx" x="270" y="486" width="500" height="52" rx="10"/>
+        <text class="lbl" x="520" y="506" text-anchor="middle">EXECUTION — brokers.py</text>
+        <text class="sub" x="520" y="522" text-anchor="middle">idempotent order IDs · GTC brackets · books ACTUAL fills · cancel-legs-then-close</text>
+        <line class="fl" x1="520" y1="538" x2="520" y2="560"/>
+
+        <rect class="bx" x="270" y="562" width="500" height="46" rx="10"/>
+        <text class="lbl" x="520" y="581" text-anchor="middle">ALPACA — paper account · $100k inception</text>
+        <text class="sub" x="520" y="597" text-anchor="middle">the only source of P&amp;L truth · GTC stops live here 24/7</text>
+
+        <!-- ================= LEFT RAIL: CONTROL ================= -->
+        <rect x="16" y="86" width="228" height="522" rx="12" fill="none" stroke="var(--gap)" stroke-width="1.5"/>
+        <text class="hd" x="130" y="106" text-anchor="middle" fill="var(--gap)">WHAT CONTROLS IT — veto power</text>
+        <text class="sub" x="30" y="132" fill="var(--txt-soft)">market calendar</text>
+        <text class="sub" x="30" y="147">no entries outside 9:30–16:00 ET</text>
+        <text class="sub" x="30" y="176" fill="var(--txt-soft)">circuit breakers</text>
+        <text class="sub" x="30" y="191">3 failures → OPEN → go blind, not wrong</text>
+        <text class="sub" x="30" y="220" fill="var(--txt-soft)">kill switch</text>
+        <text class="sub" x="30" y="235">2.5% daily loss cap · blocks all entries</text>
+        <text class="sub" x="30" y="264" fill="var(--txt-soft)">coverage guard</text>
+        <text class="sub" x="30" y="279">blind ranking (&lt;40% names) may not trade</text>
+        <text class="sub" x="30" y="308" fill="var(--txt-soft)">rotation atomicity</text>
+        <text class="sub" x="30" y="323">no exits when entries are blocked</text>
+        <text class="sub" x="30" y="352" fill="var(--txt-soft)">boot reconciliation</text>
+        <text class="sub" x="30" y="367">broker = truth · unknown holding → HALT</text>
+        <text class="sub" x="30" y="396" fill="var(--txt-soft)">strategy profile</text>
+        <text class="sub" x="30" y="411">ENABLED_SYSTEMS · benched = can't trade</text>
+        <text class="sub" x="30" y="440" fill="var(--txt-soft)">risk sizing</text>
+        <text class="sub" x="30" y="455">1% risk/trade · 10% equity/position</text>
+        <text class="sub" x="30" y="484" fill="var(--txt-soft)">GTC protective stops</text>
+        <text class="sub" x="30" y="499">live at the broker even if the bot dies</text>
+        <text class="sub" x="30" y="540" fill="var(--gap)" font-weight="600">Every guard = one incident's scar.</text>
+        <text class="sub" x="30" y="555" fill="var(--gap)">Jul 11: hundreds of halted boots,</text>
+        <text class="sub" x="30" y="570" fill="var(--gap)">zero orders. The rail held.</text>
+        <!-- veto arrows -->
+        <line class="veto" x1="244" y1="112" x2="268" y2="112"/>
+        <line class="veto" x1="244" y1="220" x2="268" y2="220"/>
+        <line class="veto" x1="244" y1="324" x2="268" y2="324"/>
+        <line class="veto" x1="244" y1="420" x2="268" y2="420"/>
+        <line class="veto" x1="244" y1="512" x2="268" y2="512"/>
+
+        <!-- ================= RIGHT RAIL: MEMORY ================= -->
+        <rect x="796" y="86" width="228" height="522" rx="12" fill="none" stroke="var(--good)" stroke-width="1.5"/>
+        <text class="hd" x="910" y="106" text-anchor="middle" fill="var(--good)">WHAT IT REMEMBERS — /data volume</text>
+        <text class="sub" x="810" y="136" fill="var(--txt-soft)">position_state.json</text>
+        <text class="sub" x="810" y="151">who owns what · survives redeploys</text>
+        <text class="sub" x="810" y="166">self-heals on evidence conflict</text>
+        <text class="sub" x="810" y="196" fill="var(--txt-soft)">rebalance_gate_state</text>
+        <text class="sub" x="810" y="211">once per day means once per day</text>
+        <text class="sub" x="810" y="241" fill="var(--txt-soft)">audit.jsonl → ntfy</text>
+        <text class="sub" x="810" y="256">every boot · fill · close · flatten ·</text>
+        <text class="sub" x="810" y="271">halt — mirrored to your phone</text>
+        <text class="sub" x="810" y="301" fill="var(--txt-soft)">trades.jsonl</text>
+        <text class="sub" x="810" y="316">R-multiples at ACTUAL fills —</text>
+        <text class="sub" x="810" y="331">the evidence the framework judges</text>
+        <text class="sub" x="810" y="362" fill="var(--txt-soft)">docs/ (this file +</text>
+        <text class="sub" x="810" y="377">STRATEGY_REFERENCE.md)</text>
+        <text class="sub" x="810" y="392">ground truth for humans &amp; AIs</text>
+        <text class="sub" x="810" y="540" fill="var(--good)" font-weight="600">Memory ends the era of</text>
+        <text class="sub" x="810" y="555" fill="var(--good)">"the logs were purged" —</text>
+        <text class="sub" x="810" y="570" fill="var(--good)">nothing important dies at redeploy.</text>
+        <!-- memory links -->
+        <line class="mem" x1="770" y1="330" x2="794" y2="330"/>
+        <line class="mem" x1="770" y1="512" x2="794" y2="512"/>
+        <line class="mem" x1="770" y1="585" x2="794" y2="585"/>
+
+        <!-- ================= BOTTOM: TEACHING LOOP ================= -->
+        <rect x="16" y="628" width="1008" height="136" rx="12" fill="none" stroke="var(--part)" stroke-width="1.5"/>
+        <text class="hd" x="520" y="648" text-anchor="middle" fill="var(--part)">WHAT TEACHES IT — the loop is human. No ML. No self-modification. Rules are frozen between deploys.</text>
+        <rect class="bx" x="34" y="662" width="150" height="52" rx="8"/>
+        <text class="lbl" x="109" y="683" text-anchor="middle" font-size="11">evidence</text>
+        <text class="sub" x="109" y="699" text-anchor="middle">funnels · audit · R's</text>
+        <line class="tch" x1="184" y1="688" x2="222" y2="688"/>
+        <rect class="bx" x="224" y="662" width="196" height="52" rx="8"/>
+        <text class="lbl" x="322" y="683" text-anchor="middle" font-size="11">operator + framework</text>
+        <text class="sub" x="322" y="699" text-anchor="middle">n≥30 · one change · after-hours only</text>
+        <line class="tch" x1="420" y1="688" x2="458" y2="688"/>
+        <rect class="bx" x="460" y="662" width="150" height="52" rx="8"/>
+        <text class="lbl" x="535" y="683" text-anchor="middle" font-size="11">code change</text>
+        <text class="sub" x="535" y="699" text-anchor="middle">reviewed · tested</text>
+        <line class="tch" x1="610" y1="688" x2="648" y2="688"/>
+        <rect class="bx" x="650" y="662" width="130" height="52" rx="8"/>
+        <text class="lbl" x="715" y="683" text-anchor="middle" font-size="11">GitHub</text>
+        <text class="sub" x="715" y="699" text-anchor="middle">the changelog</text>
+        <line class="tch" x1="780" y1="688" x2="818" y2="688"/>
+        <rect class="bx" x="820" y="662" width="186" height="52" rx="8"/>
+        <text class="lbl" x="913" y="683" text-anchor="middle" font-size="11">Railway deploy</text>
+        <text class="sub" x="913" y="699" text-anchor="middle">new rules take effect</text>
+        <text class="sub" x="520" y="740" text-anchor="middle">evidence flows from the memory rail ↑ · deploys change the pipeline ↑ · the bot itself only ever follows its current rules</text>
+        <line class="tch" x1="913" y1="662" x2="913" y2="614"/>
+
+        <!-- incident scar badges: the failure that forged each guard -->
+        <g font-family="IBM Plex Mono, monospace" font-size="11" font-weight="700">
+          <circle cx="762" cy="512" r="10" fill="var(--gap)"/>
+          <text x="762" y="516" text-anchor="middle" fill="#fff">1</text>
+          <circle cx="774" cy="376" r="10" fill="var(--gap)"/>
+          <text x="774" y="380" text-anchor="middle" fill="#fff">2</text>
+          <circle cx="758" cy="196" r="10" fill="var(--gap)"/>
+          <text x="758" y="200" text-anchor="middle" fill="#fff">3</text>
+          <circle cx="282" cy="512" r="10" fill="var(--gap)"/>
+          <text x="282" y="516" text-anchor="middle" fill="#fff">4</text>
+          <circle cx="234" cy="358" r="10" fill="var(--gap)"/>
+          <text x="234" y="362" text-anchor="middle" fill="#fff">5</text>
+        </g>
+      </svg>
+      <div class="figcap">System anatomy · center: the sense→think→decide→act pipeline · left (red, dashed):
+        guards with veto power over every stage · right (green): persistent memory on the /data volume ·
+        bottom (amber): the teaching loop — the only way the bot's behavior ever changes ·
+        numbered badges = the scar map: the incident that forged each guard (legend below)</div>
+    </div>
+
+    <p class="soft" style="font-family:'IBM Plex Mono',monospace;font-size:12px">
+      <b style="color:var(--gap)">Scar map:</b>
+      ① Jul 6 — flatten crashed on a 404 mid-close → safe-close (cancel legs, per-ticker isolation) ·
+      ② Jul 8 — bracket legs filled broker-side, phantoms lingered 8 min → per-cycle leg reconciliation ·
+      ③ Jul 9 — rotation traded a 2/63 ranking → coverage guard + rotation atomicity ·
+      ④ Jul 10 — books +$514 on a −$241 day → actual-fill booking on entries and exits ·
+      ⑤ Jul 11 — oldest-order-wins poisoned the registry, boot loop → newest-wins + registry self-heal + gentle halts ·
+      <b>⑥ Jul 15 — quote ATR computed from 1-minute bars: every stop ~1% instead of ~6%, three entries whipsawed
+      out in &lt;11 min (−$342), and the 1%-risk rule never bound because the 10% notional cap swallowed every
+      trade → explicit scale contract in the feed (atr/liquidity/sma = DAILY; vwap/rel-volume = intraday;
+      the intraday engine computes its own 1-min ATR).</b> ·
+      <b>⑦ Jul 16 — phantom closes: reconcile treated "not at the broker yet" (entry settlement lag) as
+      "a leg closed it", then priced the fake close off a STALE sell order from the PREVIOUS DAY (MU booked
+      at 943.24 — yesterday's exit — while MU actually traded at 847). Three live positions were deleted from
+      the tracker, +$742.62 of profit was invented, and the bot went blind to ~$9.6k of real risk it still
+      held → three guards: entry must be confirmed filled, absence must persist past a settlement grace, and
+      a closing fill must POSTDATE the entry or no close is booked at all.</b>
+      <b>⑧ Jul 16 — the market-calendar guard existed only in this document. Only intraday's SCAN was
+      hours-gated; swing/meanrev signals routed around the clock since inception. At 16:27 ET the post-close
+      daily-bar refresh revealed the completed bar, produced two real breakouts, and the bot fired GTC
+      brackets into a CLOSED market (PLD, UNP) — orders that would fill at the next open against stops
+      computed from stale prices; a gap below the stop is an instant stop-out on a zero-second position
+      → routing now gated on market_is_open(); scans still run (funnels stay useful), signals are held and
+      re-derived from live prices at the next open.</b>
+      <b>9. Jul 16 — reconcile INVENTED a stop. Cold registry plus a stop-leg scan returning nothing, so the fallback defaulted to entry x 0.99 — placing an invented stop ABOVE the live price of every position already >1% underwater. The first manage cycle read price &lt;= stop and liquidated UNH (real stop 405.14, price 423.38), INTC and MU — after hours, at stale quotes, at losses their strategies never sanctioned. Cost zero by luck alone: the market was shut, the sells never filled. → a fallback may never invent a triggerable stop (0.0, unreachable, CRITICAL); local stop-exits gated on market hours; xsect/meanrev re-derive from entry − MULT x daily ATR.</b> · <b>10. Jul 17 — the stop-leg scan had NEVER worked. GetOrdersRequest(nested=True) rolls bracket/OTO child legs UNDER the parent's legs field; the scan iterated only parents, whose stop_price is None. stop_by_ticker was EMPTY on every boot since the registry shipped — every position warned "no discoverable stop" even with a live GTC leg. → walk the nested legs. Confirmed by natural experiment: ARM (leg intact) is now found; INTC/MU (legs cancelled by scar 9's sell path) correctly still report absent.</b>
+      <b>11. Jul 17 — the broker&#39;s own order history, not the bot&#39;s logs, proved scar 6 and exposed two more. MU stop distances by date: 1.47%, 1.52%, 1.36%, 1.17%, 1.37% (Jul 9–15) then <b>29.13%</b> (Jul 16, ATR fix). AMD: 0.92% then 23.61%. MU was bought EVERY trading day and stopped out within minutes 4 times in 6; the one trade that escaped the hair-trigger (Jul 13) ran overnight and made <b>+$769 — more than double all five losses combined</b>, carrying the ticker to +$256 net. The bug was amputating exactly the right tail momentum exists to capture. → the strategies have never been tested; this is the first evidence they might have an edge.</b> · <b>12. Jul 17 — duplicate ENTRIES, restart-driven. Every redeploy re-signalled names whose entries were still working; no position existed, so the position-based duplicate guard passed. PLD filled 2x (130 sh vs 65) and UNP 3x (96 sh vs 32) — ~50% of equity in two names against a 10% cap. The &quot;idempotent&quot; client_order_id keyed on the MINUTE, so it only ever blocked a re-fire inside 60s. → a working-order check before every buy (refuses if it cannot verify), plus a DAILY coid window for the multi-day systems.</b>
+      Zero of the twelve reached the account twice.</p>
+
+    <p class="soft">The anatomy is the factory; below is one product moving through it — the life of a single
+      trade, from signal to the evidence file that eventually judges its strategy. Every "why is this
+      position doing X?" question is a question about which state the trade is in and which transitions
+      are legal from there.</p>
+
+    <div class="fig">
+      <svg id="trade" viewBox="0 0 1040 470" role="img" aria-label="Life of a trade state machine. A signal is sized, submitted as a GTC bracket with an idempotent ID, booked at its actual fill, then managed every cycle. Four exit doors: stop leg fills, target leg fills, rotation exit, or flatten. Every exit is recorded to trades.jsonl as an R-multiple at actual fills and audited to the phone, feeding the human teaching loop. A failed entry removes its phantom position.">
+        <defs>
+          <marker id="tar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--txt-dim)"/>
+          </marker>
+          <marker id="tarR" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--gap)"/>
+          </marker>
+          <marker id="tarG" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--good)"/>
+          </marker>
+        </defs>
+        <style>
+          #trade .bx{fill:var(--panel2);stroke:var(--line)}
+          #trade .lbl{font-family:'IBM Plex Mono',monospace;fill:var(--txt);font-size:12px;font-weight:600}
+          #trade .sub{font-family:'IBM Plex Mono',monospace;fill:var(--txt-dim);font-size:10.5px}
+          #trade .fl{stroke:var(--txt-dim);stroke-width:1.6;fill:none;marker-end:url(#tar)}
+          #trade .bad{stroke:var(--gap);stroke-width:1.3;stroke-dasharray:4 4;fill:none;marker-end:url(#tarR)}
+          #trade .ok{stroke:var(--good);stroke-width:1.6;fill:none;marker-end:url(#tarG)}
+        </style>
+
+        <!-- main flow -->
+        <rect class="bx" x="16" y="52" width="140" height="72" rx="10"/>
+        <text class="lbl" x="86" y="76" text-anchor="middle">SIGNAL</text>
+        <text class="sub" x="86" y="92" text-anchor="middle">scanner / ranker fires</text>
+        <text class="sub" x="86" y="106" text-anchor="middle">funnel logs it</text>
+        <line class="fl" x1="156" y1="88" x2="178" y2="88"/>
+
+        <rect class="bx" x="180" y="52" width="150" height="72" rx="10"/>
+        <text class="lbl" x="255" y="76" text-anchor="middle">SIZED</text>
+        <text class="sub" x="255" y="92" text-anchor="middle">1% risk · ATR stop</text>
+        <text class="sub" x="255" y="106" text-anchor="middle">10% cap · kill-switch OK?</text>
+        <line class="fl" x1="330" y1="88" x2="352" y2="88"/>
+
+        <rect class="bx" x="354" y="52" width="150" height="72" rx="10"/>
+        <text class="lbl" x="429" y="76" text-anchor="middle">SUBMITTED</text>
+        <text class="sub" x="429" y="92" text-anchor="middle">GTC bracket</text>
+        <text class="sub" x="429" y="106" text-anchor="middle">idempotent order ID</text>
+        <line class="fl" x1="504" y1="88" x2="526" y2="88"/>
+
+        <rect class="bx" x="528" y="52" width="150" height="72" rx="10"/>
+        <text class="lbl" x="603" y="76" text-anchor="middle">FILLED</text>
+        <text class="sub" x="603" y="92" text-anchor="middle">booked at ACTUAL fill</text>
+        <text class="sub" x="603" y="106" text-anchor="middle">slippage logged · registry ✎</text>
+        <line class="fl" x1="678" y1="88" x2="700" y2="88"/>
+
+        <rect x="702" y="36" width="180" height="104" rx="12" fill="var(--panel2)" stroke="var(--you)" stroke-width="1.5"/>
+        <text class="lbl" x="792" y="60" text-anchor="middle" fill="var(--you)">MANAGED</text>
+        <text class="sub" x="792" y="78" text-anchor="middle">every cycle:</text>
+        <text class="sub" x="792" y="92" text-anchor="middle">mark price · trail stop</text>
+        <text class="sub" x="792" y="106" text-anchor="middle">reconcile filled legs</text>
+        <text class="sub" x="792" y="120" text-anchor="middle">registry in sync</text>
+        <path class="fl" d="M 882 60 C 918 46, 918 96, 884 96" fill="none"/>
+        <text class="sub" x="930" y="80">~5s loop</text>
+
+        <!-- failed-entry branch -->
+        <line class="bad" x1="429" y1="124" x2="429" y2="156"/>
+        <rect x="334" y="158" width="190" height="52" rx="10" fill="var(--panel2)" stroke="var(--gap)"/>
+        <text class="lbl" x="429" y="180" text-anchor="middle" font-size="11" fill="var(--gap)">canceled / expired / rejected</text>
+        <text class="sub" x="429" y="196" text-anchor="middle">phantom position removed · no trade</text>
+
+        <!-- duplicate-signal note -->
+        <line class="bad" x1="86" y1="124" x2="86" y2="156"/>
+        <rect x="20" y="158" width="180" height="52" rx="10" fill="var(--panel2)" stroke="var(--gap)"/>
+        <text class="lbl" x="110" y="180" text-anchor="middle" font-size="11" fill="var(--gap)">already held / duplicate</text>
+        <text class="sub" x="110" y="196" text-anchor="middle">dropped &amp; logged · no order</text>
+
+        <!-- four exit doors -->
+        <text class="sub" x="792" y="176" text-anchor="middle" fill="var(--txt-soft)" font-weight="600">FOUR EXIT DOORS — exactly one fires</text>
+        <line class="fl" x1="722" y1="140" x2="640" y2="196"/>
+        <line class="fl" x1="770" y1="140" x2="748" y2="196"/>
+        <line class="fl" x1="816" y1="140" x2="838" y2="196"/>
+        <line class="fl" x1="862" y1="140" x2="944" y2="196"/>
+
+        <rect class="bx" x="560" y="198" width="158" height="66" rx="10"/>
+        <text class="lbl" x="639" y="220" text-anchor="middle" font-size="11">stop leg fills</text>
+        <text class="sub" x="639" y="236" text-anchor="middle">broker-side · 24/7 GTC</text>
+        <text class="sub" x="639" y="250" text-anchor="middle">booked at leg's fill</text>
+
+        <rect class="bx" x="726" y="198" width="98" height="66" rx="10"/>
+        <text class="lbl" x="775" y="220" text-anchor="middle" font-size="11">target leg</text>
+        <text class="sub" x="775" y="236" text-anchor="middle">2R cap</text>
+        <text class="sub" x="775" y="250" text-anchor="middle">(xsect: open Q)</text>
+
+        <rect class="bx" x="832" y="198" width="92" height="66" rx="10"/>
+        <text class="lbl" x="878" y="220" text-anchor="middle" font-size="11">rotation</text>
+        <text class="sub" x="878" y="236" text-anchor="middle">falls out of</text>
+        <text class="sub" x="878" y="250" text-anchor="middle">top-3 (xsect)</text>
+
+        <rect class="bx" x="932" y="198" width="94" height="66" rx="10"/>
+        <text class="lbl" x="979" y="220" text-anchor="middle" font-size="11">flatten</text>
+        <text class="sub" x="979" y="236" text-anchor="middle">EOD (intraday)</text>
+        <text class="sub" x="979" y="250" text-anchor="middle">or emergency</text>
+
+        <!-- converge to record -->
+        <line class="ok" x1="639" y1="264" x2="639" y2="308"/>
+        <line class="ok" x1="775" y1="264" x2="700" y2="308"/>
+        <line class="ok" x1="878" y1="264" x2="740" y2="310"/>
+        <line class="ok" x1="979" y1="264" x2="770" y2="314"/>
+
+        <rect x="480" y="310" width="320" height="62" rx="10" fill="var(--panel2)" stroke="var(--good)" stroke-width="1.5"/>
+        <text class="lbl" x="640" y="332" text-anchor="middle" fill="var(--good)">RECORDED — trades.jsonl</text>
+        <text class="sub" x="640" y="348" text-anchor="middle">R-multiple computed at ACTUAL entry &amp; exit fills</text>
+        <text class="sub" x="640" y="362" text-anchor="middle">the unit of account the framework judges</text>
+
+        <line class="ok" x1="800" y1="341" x2="838" y2="341"/>
+        <rect x="840" y="316" width="186" height="52" rx="10" fill="var(--panel2)" stroke="var(--good)"/>
+        <text class="lbl" x="933" y="338" text-anchor="middle" font-size="11" fill="var(--good)">AUDITED → ntfy</text>
+        <text class="sub" x="933" y="354" text-anchor="middle">close event on your phone</text>
+
+        <line class="ok" x1="640" y1="372" x2="640" y2="404"/>
+        <text class="sub" x="640" y="424" text-anchor="middle" fill="var(--part)">→ evidence for the teaching loop: at n≥30 closed trades per system,</text>
+        <text class="sub" x="640" y="440" text-anchor="middle" fill="var(--part)">the framework renders maintain / tune / retire — and only a human deploy changes the rules</text>
+      </svg>
+      <div class="figcap">Life of a single trade · red branches: entries that never become trades (dropped
+        duplicates, dead orders — phantoms removed) · exactly one green door closes every position ·
+        every exit lands in trades.jsonl at actual fills, which is what the strategy verdicts will be made of</div>
+    </div>
+  </section>
+
+  <!-- ROADMAP -->
+  <section>
+    <div class="ey">WHAT'S NEXT</div>
+    <h2>Priority roadmap</h2>
+    <div class="road">
+      <div class="step"><div class="n"></div><div><h3>Strategy re-focus: swing + xsectmom, meanrev at lesser weight <span class="prio done">deployed ✓ Jul 8</span></h3><p>Intraday benched via <span class="mono">ENABLED_SYSTEMS</span> profile (code retained). Boot now halts if the broker holds positions belonging to a benched system, so nothing sits unmanaged. Backtest harness is now the gate for intraday's return.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Signal-pipeline health: funnel logging, bar-depth guard, wall-clock rebalance <span class="prio done">deployed ✓ Jul 9</span></h3><p>First three-book session scanned clean but picked nothing — and nothing in the logs could say whether that was patience or plumbing. Shipped: per-gate scan funnels (attrition visible per cycle), a boot check that screams if the daily-candle fetch is shorter than a strategy's lookback (meanrev needs 210 bars, xsectmom 140 — a short fetch makes them silently dead forever), and a wall-clock 10:00 ET rebalance gate for xsectmom replacing the cycle-count cadence, which the 5.7s loop had silently turned from "daily" into ~74 minutes. All hooks live as of Jul 9: funnels confirm bars_ok=63/63, gate fires at 10:00 ET
+       with persisted state.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>P&amp;L attribution: entry-fill accuracy + unrealized
+       reconciliation <span class="prio done">shipped ✓ Jul 10 · weekend deploy</span></h3>
+       <p>sell() records actual fills; buy() still records the pre-trade quote, hiding entry slippage —
+       why the bot booked −$99 on trades Alpaca settled at +$10. Jul 9 closed with ~$430 unattributed in
+       the bot's books (equity −$434 vs realized +$10, unrealized shown 0.00 with one position open).
+       buy() now polls entry fills (3s) with a per-cycle correction pass for slow fills; canceled entries
+       remove their phantom positions; a persistent position registry on /data attributes multi-day holds
+       at boot without order-scan dependence. Monday is the first session where bot books and broker
+       equity should agree to within a few dollars — that agreement is the verification.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Weekend hardening: provenance, GTC stops,
+       depth guard, quiet funnels <span class="prio done">deployed &amp; verified ✓ Jul 11</span></h3>
+       <p>Newest-order-wins attribution with registry self-heal; gentle halts; GTC brackets for all
+       multi-day systems (DAY legs were silently expiring at each close); bar-depth guard fixed and
+       passing its first real check (343 bars, all strategies OK); funnels emit-on-change. Verified
+       live across three Saturday boots.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>xsectmom bracket structure → stop-only
+       <span class="prio done">decided &amp; shipped ✓ Jul 14</span></h3>
+       <p>OTO stop-only brackets for xsectmom (env-overridable per system). Winners now ride until they
+       rotate out of rank or hit the stop. Verification: afternoon logs should show entries still held on
+       trending days, and xsect's average winner should grow — measured over the next ~two dozen rotations
+       as a distinct sample.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Backtest harness — now the top priority
+       <span class="prio hi">next · earned it</span></h3>
+       <p>Scar ⑥ is the argument: a replay over historical bars would have shown xsectmom stopping out in
+       minutes on day one and cost an afternoon to find — instead it ran live for two weeks and voided the
+       whole sample. A no-lookahead harness is what turns "I think" into "the sample says", and it is the
+       gate every other idea (after-hours, intraday's return, threshold tuning) waits behind. Build it before
+       adding anything.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Unit-scale audit of every indicator consumer
+       <span class="prio hi">next</span></h3>
+       <p>Two unit bugs (liquidity Jul 9, ATR Jul 15) came from the same place: a quote that silently mixed
+       1-minute and daily scale. The contract is now explicit in feed_layer — audit every remaining consumer
+       against it (sma, rel_volume, vwap). A boot assertion on ATR/price is still wanted, but Jul 16 proved
+       it cannot be a fixed band: MU legitimately ran ~9.7% while UNH ran 2.4%. Log ATR-as-%-of-price at
+       every entry instead, so a scale regression is visible without vetoing real volatility.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Next session: verify both fix rounds against predictions <span class="prio hi">next open</span></h3>
+        <p>Churn collapses (≈1 open/ticker), losers cluster near −1R, PLTR trades, trail engages on
+          runners, xsectmom holds through the day and now ranks a 63-name pool. Watch the logs for
+          first signals from the new sectors (JPM, XOM, UNH, CAT…). Markets reopen Monday — the first
+          full session of the corrected 63-name system. Concrete, falsifiable.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Run the backtest on real history <span class="prio hi">unchanged · still the big one</span></h3>
+        <p>fetch_history + backtest with an out-of-sample split. Hundreds of trades in seconds — the only
+          fast route to "is there an edge," and where threshold questions get answered.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Universe expansion: 63 names / 14 sectors + tiered scanning <span class="prio done">done ✓</span></h3>
+        <p>Cross-sector breadth with the rate budget enforced by the test suite (~50 calls/min vs 140 limit).</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Persist state + reconcile from broker on boot <span class="prio done">deployed ✓</span></h3>
+        <p>Positions rebuilt from Alpaca at startup; unrecognized holdings halt the bot as orphans. Duplicate
+          orders blocked two ways (broker-side check + deterministic client_order_id). Volume-backed
+          audit.jsonl and trades.jsonl now survive redeploys, with critical events mirrored to ntfy.sh.</p></div></div>
+      <div class="step"><div class="n"></div><div><h3>Calibration fixes (sizing · stops · liquidity) + coherence fixes (loss-scaling · trail · rebalance) <span class="prio done">deployed ✓</span></h3>
+        <p>Both rounds confirmed live on Railway; 58/58 tests lock them in.</p></div></div>
+    </div>
+  </section>
+
+  <!-- CAVEAT -->
+  <section style="border-bottom:none">
+    <div class="ey">THE HONEST CAVEAT</div>
+    <h2>Coherent ≠ profitable</h2>
+    <p class="soft">Everything fixed this week makes the model measure honestly. None of it makes the model
+      make money. The strategies' thresholds and lookbacks remain exactly as designed — deliberately — and
+      whether that design has an edge is still an open question with zero evidence either way.</p>
+    <div class="callout warn"><b>Two traps, unchanged:</b> reading the next green or red day as a verdict
+      (single sessions validate mechanics, never edge), and tuning thresholds off daily P&amp;L (the
+      threshold is the strategy; test changes in the backtest, where a bad idea costs seconds).</div>
+    <div class="callout good"><b>The pivot point:</b> the tuning phase is essentially complete. From here,
+      the work stops being "fix the machine" and becomes "collect the evidence" — honest paper trades
+      accumulating toward Monte Carlo's 30-trade bar, and the backtest on real history. Those two, together,
+      are what decide anything at the gate.</div>
+  </section>
+
+  <footer>
+    <p>Agentic Trader benchmark &amp; status (rev 25) — the complete system map shipped (system_architecture.html): four pillars named and used (GitHub blueprint, Railway body + /data memory, Finnhub eyes, Alpaca hands + second eyes), the operator's from-memory sketch corrected on three points (swing_v2's separate Alpaca data pipe, the SWING2/old-swing position mislabel, and the missing execution + memory half — the half with the scars), Finnhub rediscovered as a paid load-bearing dependency, and the 63&rarr;68 universe arithmetic confirmed pending a config eyeball. Rev 24 — diversification package: sector-capped rotation (the AMD/ARM/MU monoculture fixed at the selector, not the universe), SPY/200-SMA regime filter (entries only, fails open, kill-switch atomicity in xsect), five additions widening healthcare/insurance/exchange/rate-cyclical streams, and a rotation-replay harness that prices the cap before it trades (synthetic: 35% monoculture days uncapped &rarr; 0% capped). Day-one rotation effect pre-announced; every piece behind its own switch and its own table. Rev 23 — ghost #2 confirmed seeing (full 63-name attrition, frozen-after-bell correctness); first incident-free close on record (zero errors across the bell, no after-hours orders); trades.jsonl found empty and autopsy.py shipped (audit-trail primary, Alpaca FIFO fallback, incident-day exclusion); the "8 queued setups" status-report misread corrected and recorded as a governance rule; swing drift &minus;$1,290&rarr;&minus;$679 changes the exit price, not the structural case. Rev 22 — swing entries benched behind a full-fidelity shadow gate; swing_v2 candidate deployed structurally shadow-only (live refused in code — orphan-at-reconcile safety); log severities fixed (INFO&rarr;stdout); two swing_v2 first-deploy bugs found and fixed the same day (ALPACA_*/APCA_* key naming, missing start date on the bars fetch); reconcile revealed PLD/UNP duplicate-stack residue inside the swing bleed. Verdict machinery armed: trades.jsonl autopsy + two-window backtest + live A/B. Rev 21: the broker&#39;s order history became the source of truth. It proved the ATR bug from fills (MU stops 1.4% -> 29.1%), showed the one trade that escaped the hair-trigger earned more than all the whipsaws lost, and exposed restart-driven duplicate entries. _walk_order verified in production: positions now adopt with real stops AND corrected quantities. Engineering-focused; excludes strategy performance by the broker&#39;s order history became the source of truth. It proved the ATR bug from fills (MU stops 1.4% -> 29.1%), showed the one trade that escaped the hair-trigger earned more than all the whipsaws lost, and exposed restart-driven duplicate entries. _walk_order verified in production: positions now adopt with real stops AND corrected quantities. Engineering-focused; excludes strategy performance by
+      design. Not financial advice. Verify all broker/data integrations against current provider docs.</p>
+  </footer>
+
+</div>
+</body>
+</html>

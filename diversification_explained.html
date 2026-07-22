@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What the Diversification Change Does — Plain English</title>
+<style>
+  :root{
+    --ink:#22252a; --soft:#5c636e; --line:#dfe3e8; --bg:#fbfcfd;
+    --ok:#1a7f4f; --warn:#a05a00; --tech:#4a5fc1; --alt:#1a7f4f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.65 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:760px;margin:0 auto;padding:48px 24px 80px}
+  h1{font-size:30px;line-height:1.25;margin:0 0 6px}
+  .date{color:var(--soft);font-size:14px;margin:0 0 28px}
+  h2{font-size:20px;margin:40px 0 8px;padding-top:18px;border-top:1px solid var(--line)}
+  p{margin:0 0 14px}
+  .soft{color:var(--soft)}
+  code{background:#eef1f4;border:1px solid var(--line);border-radius:4px;
+       padding:1px 6px;font:13.5px/1.5 ui-monospace,Menlo,Consolas,monospace}
+  /* the one visual: before/after top-3 */
+  .demo{display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+        margin:18px 0 22px;padding:16px;border:1px solid var(--line);
+        border-radius:10px;background:#fff}
+  .book{flex:1;min-width:230px}
+  .book .cap{font-size:12px;letter-spacing:.06em;text-transform:uppercase;
+             color:var(--soft);margin-bottom:8px}
+  .pos{display:flex;justify-content:space-between;border:1px solid var(--line);
+       border-radius:6px;padding:7px 10px;margin:6px 0;font-size:14.5px;background:#fff}
+  .pos b{font-weight:600}
+  .sec{font-size:12.5px;color:#fff;border-radius:4px;padding:1px 8px;align-self:center}
+  .sec.tech{background:var(--tech)} .sec.ind{background:#7a6b3a}
+  .sec.mat{background:#3a7a6b}
+  .arrow{font-size:22px;color:var(--soft);padding:0 4px}
+  .note{font-size:13.5px;color:var(--soft);margin-top:6px}
+  table{border-collapse:collapse;width:100%;margin:14px 0 6px;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f2f4f7;font-weight:600}
+  .on{color:var(--ok);font-weight:600} .heads{color:var(--warn);font-weight:600}
+  ul{margin:0 0 14px 20px;padding:0}
+  li{margin:0 0 8px}
+</style>
+</head>
+<body>
+<main>
+  <h1>What the diversification change does</h1>
+  <p class="date">Plain-English explainer · prepared for the July 22, 2026 after-hours push</p>
+
+  <p>This change teaches the trading bot two things it did not know before:
+  <b>what a sector is</b>, and <b>what market weather is</b>. It also adds five
+  new stocks to the watchlist. Each piece has its own on/off switch and only
+  turns on after a historical test approves it.</p>
+
+  <h2>The problem, in one picture</h2>
+  <p>One of the bot's strategies ("xsectmom") holds the 3 strongest stocks out
+  of 63 and rotates as rankings change. The watchlist was carefully built with
+  14 different sectors — but the strategy picks purely by recent performance,
+  and during an AI rally the three best performers are always chips. So the
+  "diversified" book looked like this:</p>
+
+  <div class="demo">
+    <div class="book">
+      <div class="cap">Before — top 3 by raw ranking</div>
+      <div class="pos"><b>MU</b><span class="sec tech">semis</span></div>
+      <div class="pos"><b>AMD</b><span class="sec tech">semis</span></div>
+      <div class="pos"><b>ARM</b><span class="sec tech">semis</span></div>
+      <div class="note">Three tickers, one bet. If chips fall, all three fall together.</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="book">
+      <div class="cap">After — same ranking, max 1 per sector</div>
+      <div class="pos"><b>MU</b><span class="sec tech">semis</span></div>
+      <div class="pos"><b>GE</b><span class="sec ind">industrials</span></div>
+      <div class="pos"><b>NEM</b><span class="sec mat">gold</span></div>
+      <div class="note">Still momentum — but three different bets.</div>
+    </div>
+  </div>
+
+  <h2>Change 1 — the sector cap</h2>
+  <p>When the strategy picks its top 3, it now walks down the ranking and takes
+  <b>at most one stock per sector</b>. The strongest chip still gets in; the
+  second- and third-strongest chips are skipped in favor of the strongest
+  stocks from <i>other</i> sectors. Every skipped name is written to the log,
+  so you can always see what diversification cost that day.</p>
+  <p><b>The honest trade-off:</b> during a rally in one sector, the capped
+  version will earn less than the uncapped one — on purpose. It gives up some
+  upside in the hottest sector to avoid being wiped out with it. Whether that
+  trade is worth it is exactly what the historical test measures.</p>
+  <p><b>One thing to expect on day one:</b> if the cap turns on while the bot
+  still holds MU, AMD, and ARM, the next morning's 10:00 rotation will
+  <b>sell two of them</b> and buy the strongest non-chip names. That is the
+  change working as designed, not a malfunction.</p>
+
+  <h2>Change 2 — the regime filter (noticing the weather)</h2>
+  <p>Every strategy in this bot buys stocks and profits when they rise. None of
+  them had any idea whether the overall market was healthy. The regime filter
+  adds one shared reflex: <b>while the S&amp;P 500 is trading below its 200-day
+  average — a common "bad weather" line — the bot stops opening new
+  positions.</b> Anywhere, in every strategy.</p>
+  <ul>
+    <li><b>It only blocks new buys.</b> Selling, stop-losses, and protective
+      exits are never blocked — reducing risk is always allowed.</li>
+    <li><b>If it can't get the data, it stands aside.</b> A broken safety
+      check must never freeze the bot, so on any data problem the filter
+      allows trading and complains loudly in the log instead.</li>
+    <li><b>You'll know when it flips.</b> Every risk-on/risk-off change is
+      logged, saved to the permanent audit file, and sent to your phone.</li>
+  </ul>
+
+  <h2>Change 3 — five new stocks</h2>
+  <p>The watchlist already covered most sectors well. These five fill the
+  genuinely thin spots — each one behaves differently from what's already
+  there:</p>
+  <table>
+    <tr><th>Ticker</th><th>What it adds</th></tr>
+    <tr><td><b>ABBV</b>, <b>MRK</b></td><td>More healthcare depth (it had 4 names vs. 8 in defense).</td></tr>
+    <tr><td><b>PGR</b></td><td>An insurer — the financials were all banks and card networks.</td></tr>
+    <tr><td><b>CME</b></td><td>An exchange — one of the few stocks that tends to do <i>well</i> when markets get turbulent.</td></tr>
+    <tr><td><b>DHI</b></td><td>A homebuilder — direct benefit from interest-rate cuts, which nothing else on the list gives.</td></tr>
+  </table>
+  <p class="soft">Deliberately <i>not</i> added: more chip stocks, more defense
+  stocks, or small companies that are expensive to trade.</p>
+
+  <h2>What decides whether each piece turns on</h2>
+  <p>A replay tool re-runs the last two years of history and shows, in one
+  table, what the cap, the filter, and the new names would have done —
+  returns, worst drawdown, and how often the old approach held three copies of
+  the same sector. Each piece is approved or rejected on its own numbers.
+  Nothing turns on because it sounds like a good idea.</p>
+  <table>
+    <tr><th>Piece</th><th>Switch</th><th>To undo</th></tr>
+    <tr><td>Sector cap</td><td><code>XSECT_SECTOR_CAP=1</code></td><td>Set to <code>0</code> — no redeploy needed</td></tr>
+    <tr><td>Regime filter</td><td><code>REGIME_FILTER=on</code> <span class="on">(default)</span></td><td>Set to <code>off</code></td></tr>
+    <tr><td>New stocks</td><td>Added to the watchlist in config</td><td>Remove them</td></tr>
+  </table>
+
+  <h2>What does <u>not</u> change</h2>
+  <ul>
+    <li>How orders are placed, tracked, and reconciled — untouched.</li>
+    <li>The swing strategy stays benched; its shadow experiment continues.</li>
+    <li>Existing stop-losses and exits work exactly as before.</li>
+    <li>Crypto remains parked; nothing here touches it.</li>
+  </ul>
+
+  <p class="soft" style="margin-top:34px;border-top:1px solid var(--line);padding-top:16px">
+  One sentence to remember: <b class="heads">the watchlist was always diversified —
+  this change makes the bot able to see it.</b></p>
+</main>
+</body>
+</html>
