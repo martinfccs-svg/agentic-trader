@@ -9,14 +9,44 @@ correlation-checked against the momentum books (that's the whole point).
 from __future__ import annotations
 
 import logging
+import os
+from datetime import date, datetime, timezone
 
 from config import MEANREV, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import rsi
+import meanrev_scoring as mrs
 from models import Action, Signal, System
 from risk import position_size
 from safety import market_is_open
 
 log = logging.getLogger("meanrev")
+
+# ---------------------------------------------------------------------------
+# TIME STOP (2026-07-22 gap fix). Mean reversion's thesis is time-bound —
+# "the dip snaps back within days" (STRATEGY_REFERENCE: holding period days)
+# — but this engine had no clock. A position whose RSI recovered to just
+# under rsi_exit and stalled, price above the STATIC stop, sat in one of
+# only 4 slots indefinitely with an expired thesis. Swing resolves every
+# trade eventually via its trailing stop; meanrev was the one engine where
+# dead money could live rent-free. After N TRADING days without the RSI
+# exit or a stop, the position is closed as dead money.
+# MEANREV_TIME_STOP_DAYS=0 disables (restores prior behavior, no redeploy).
+# ---------------------------------------------------------------------------
+MEANREV_TIME_STOP_DAYS = int(os.getenv("MEANREV_TIME_STOP_DAYS", "10"))
+
+
+def _trading_days_since(entry_epoch: float) -> int:
+    """Weekday count from entry date to today (UTC dates). Holidays are
+    counted as trading days — a day of slack on a 10-day stop is
+    immaterial and not worth a calendar dependency."""
+    a = datetime.fromtimestamp(entry_epoch, tz=timezone.utc).date()
+    b = datetime.now(timezone.utc).date()
+    days, cur = 0, a
+    while cur < b:
+        cur = date.fromordinal(cur.toordinal() + 1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
 
 
 class NullNotifier:
@@ -113,15 +143,71 @@ class MeanReversionEngine:
                              MEANREV.atr_stop_multiple, q.atr)
             bars = self._feed.get_daily_bars(ticker)
             r = rsi(bars.close, MEANREV.rsi_period) if bars else None
-            # Exit when reverted to the mean (RSI recovered) OR stop hit.
-            hit_exit = ((r is not None and r >= MEANREV.rsi_exit)
-                        or q.price <= pos.stop_price)
+            held = _trading_days_since(pos.entry_time)
+
+            # ---- EXIT LADDER (2026-07-22): live scoring mode only ---------
+            # Breakeven at +1R, then 2xATR trail (stop only ratchets UP),
+            # then final-RSI / trend-reversal(close<EMA200) / time — computed
+            # by the same pure function the backtest uses. NOTE: when this
+            # mode goes live, set MEANREV_USE_TAKE_PROFIT=false so the OTO
+            # stop-only bracket lets the ladder own profit-taking; the 3R TP
+            # leg would otherwise exit before the trail ever engages.
+            # In shadow/off modes the ORIGINAL exit logic below runs
+            # unchanged.
+            if mrs.SCORING_MODE == "live" and bars is not None:
+                e200 = mrs.ema(bars.close, mrs.EMA_SLOW)
+                new_stop, ladder_reason = mrs.ladder_decision(
+                    price=q.price, entry=pos.entry_price,
+                    entry_stop=pos.entry_stop or pos.stop_price,
+                    stop=pos.stop_price, high_water=pos.high_water,
+                    atr14=q.atr, ema200=e200, last_close=bars.close[-1],
+                    rsi_value=r, rsi_exit=MEANREV.rsi_exit,
+                    held_days=held,
+                    time_stop_days=MEANREV_TIME_STOP_DAYS)
+                if new_stop > pos.stop_price:
+                    pos.stop_price = new_stop
+                if ladder_reason and market_is_open():
+                    log.warning("meanrev LADDER exit %s: reason=%s held=%dd "
+                                "px=%.2f stop=%.2f", ticker, ladder_reason,
+                                held, q.price, pos.stop_price)
+                    try:
+                        exit_price = q.price
+                        entry_price = pos.entry_price
+                        shares = pos.shares
+                        realized = self._broker.sell(ticker, exit_price)
+                        self._log.record_close(System.MEANREV, realized)
+                        if exit_price is not None and realized is not None:
+                            self._notifier.notify_exit(
+                                ticker=ticker, shares=shares,
+                                exit_price=exit_price,
+                                entry_price=entry_price, pnl=realized,
+                                system=System.MEANREV.value)
+                    except Exception as e:  # noqa: BLE001
+                        log.error("meanrev ladder exit %s failed (retry "
+                                  "next cycle): %s", ticker, e)
+                continue   # ladder owns this position; skip legacy exit
+            # Exit reasons in priority order, RECORDED (2026-07-22): the old
+            # combined boolean made a reverted winner, a stopped loser, and
+            # expired dead money indistinguishable in the logs — a hole the
+            # autopsy would have hit. rsi_reverted > stop > time.
+            reason = None
+            if r is not None and r >= MEANREV.rsi_exit:
+                reason = f"rsi_reverted({r:.1f}>={MEANREV.rsi_exit:.0f})"
+            elif q.price <= pos.stop_price:
+                reason = "stop"
+            elif MEANREV_TIME_STOP_DAYS and held >= MEANREV_TIME_STOP_DAYS:
+                reason = (f"time({held}d,rsi={r:.1f})" if r is not None
+                          else f"time({held}d)")
+            hit_exit = reason is not None
             # Local stop is a BACKUP to the broker-side GTC leg, which is
             # live 24/7. Firing it while the market is CLOSED just sells at a
             # stale quote — on 2026-07-16 that dumped UNH/INTC/MU at
             # "quote-est" prices 30 min after the bell. If a stop is genuinely
             # hit during the session, the broker's own leg fills it.
             if hit_exit and market_is_open():
+                log.warning("meanrev exit %s: reason=%s held=%dd px=%.2f "
+                            "stop=%.2f", ticker, reason, held, q.price,
+                            pos.stop_price)
                 try:
                     exit_price = q.price
                     entry_price = pos.entry_price
