@@ -43,6 +43,12 @@ import regime
 
 log = logging.getLogger("scanner")
 
+# Scorecard log throttle (2026-07-22, first night in production): a sticky
+# RSI trigger (IONQ) printed an identical card every cycle — ~600 lines/hr
+# at session cadence. Log a ticker's card only when its CONTENT changes;
+# zero information lost, repeats suppressed.
+_last_cards: dict[str, str] = {}
+
 
 class PriceActionScanner:
     def __init__(self, feed, universe: list[str], intraday_universe: list[str] | None = None) -> None:
@@ -147,11 +153,14 @@ class PriceActionScanner:
                                            bars.volume, r,
                                            MEANREV.rsi_oversold, spy_close)
                 if card:
-                    log.info("meanrev_score %s: score=%d/6 trigger=%s "
-                             "trend_gate=%s market=%s | %s", t, card.score,
-                             card.trigger, card.gate_trend, market_ok,
-                             " ".join(k for k, v in card.factors.items() if v)
-                             or "(no factors)")
+                    card_str = ("score=%d/6 trigger=%s trend_gate=%s "
+                                "market=%s | %s" % (card.score, card.trigger,
+                                card.gate_trend, market_ok,
+                                " ".join(k for k, v in card.factors.items()
+                                         if v) or "(no factors)"))
+                    if _last_cards.get(t) != card_str:
+                        _last_cards[t] = card_str
+                        log.info("meanrev_score %s: %s", t, card_str)
 
             if scoring == "live":
                 if card and card.qualifies() and market_ok:
