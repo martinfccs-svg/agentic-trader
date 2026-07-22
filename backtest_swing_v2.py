@@ -39,6 +39,110 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from swing_v2 import (detect_setup, ema, atr, RISK_PCT, MAX_NOTIONAL_PCT,   # noqa
                       MAX_CONCURRENT, MAX_NEW_PER_DAY, SETUP_EXPIRY_DAYS,
                       TIME_STOP_DAYS, VOL_MULT_B)
+from meanrev_scoring import adx as _adx   # Wilder ADX, already unit-tested
+
+
+def _rsi(values, period=14):
+    if len(values) < period + 1:
+        return None
+    g = [max(values[i] - values[i-1], 0.0) for i in range(1, len(values))]
+    l = [max(values[i-1] - values[i], 0.0) for i in range(1, len(values))]
+    ag, al = sum(g[:period]) / period, sum(l[:period]) / period
+    for i in range(period, len(g)):
+        ag = (ag * (period - 1) + g[i]) / period
+        al = (al * (period - 1) + l[i]) / period
+    return 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+
+
+# ---------------------------------------------------------------------------
+# filt_brkout — the operator's filtered-breakout proposal (2026-07-22),
+# CORRECTED: breakout vs the PRIOR 20 highs (the submitted code's
+# tail(20).max() included today's bar, requiring close >= today's own high —
+# near-signal-less silently; indicators.prior_high documents this trap).
+# Signal on completed bar t: close > max(high[t-20:t]) AND EMA50>EMA200 AND
+# close>EMA200 AND 45<=RSI(14)<=65 AND ADX(14)>20 AND vol > 1.2 x avg20.
+# Entry next open; stop = entry - 2.0*ATR14; sole exit = 2.0*ATR trail off
+# the highest close (never widens); gap-honest fills.
+# ---------------------------------------------------------------------------
+def run_filtered_breakout(all_bars, dates, start_equity, cost):
+    equity = start_equity
+    curve = [equity]
+    positions = {}   # sym -> {e, stop, hc, sh}
+    trades = []
+    syms = [x for x in all_bars if x != "SPY"]
+    for di in range(60, len(dates) - 1):
+        today = dates[di]
+        # exits
+        for sym in list(positions):
+            p = positions[sym]
+            b = _bar(all_bars[sym], today)
+            if not b:
+                continue
+            p["hc"] = max(p["hc"], b["c"])
+            a = atr(_bars_upto(all_bars[sym], today, inclusive=True), 14)
+            if a:
+                p["stop"] = max(p["stop"], p["hc"] - 2.0 * a)
+            fill = None
+            if b["o"] <= p["stop"]:
+                fill = b["o"]
+            elif b["l"] <= p["stop"]:
+                fill = p["stop"]
+            if fill:
+                pnl = p["sh"] * (fill - p["e"]) - p["sh"] * fill * cost
+                equity += pnl
+                trades.append({"sym": sym, "pnl": pnl, "reason": "trail",
+                               "held": 0})
+                del positions[sym]
+        # entries from yesterday's completed bar
+        entries_today = 0
+        for sym in syms:
+            if sym in positions or len(positions) >= MAX_CONCURRENT                     or entries_today >= MAX_NEW_PER_DAY:
+                continue
+            hist = _bars_upto(all_bars[sym], today, inclusive=False)
+            if len(hist) < 210:
+                continue
+            closes = [x["c"] for x in hist]
+            cur = hist[-1]
+            prior_high20 = max(x["h"] for x in hist[-21:-1])
+            if not cur["c"] > prior_high20:
+                continue
+            e50, e200 = ema(closes, 50), ema(closes, 200)
+            if not (e50 and e200 and e50 > e200 and cur["c"] > e200):
+                continue
+            r = _rsi(closes, 14)
+            if r is None or not (45 <= r <= 65):
+                continue
+            a_val = _adx([x["h"] for x in hist], [x["l"] for x in hist],
+                         closes, 14)
+            if a_val is None or a_val <= 20:
+                continue
+            av20 = sum(x["v"] for x in hist[-21:-1]) / 20
+            if not (av20 and cur["v"] > 1.2 * av20):
+                continue
+            b = _bar(all_bars[sym], today)
+            a14 = atr(hist, 14)
+            if not b or not a14:
+                continue
+            entry_px = b["o"]
+            stop = entry_px - 2.0 * a14
+            dist = entry_px - stop
+            if dist <= 0:
+                continue
+            sh = int(min(equity * RISK_PCT / dist,
+                         equity * MAX_NOTIONAL_PCT / entry_px))
+            if sh <= 0:
+                continue
+            equity -= sh * entry_px * cost
+            positions[sym] = {"e": entry_px, "stop": stop, "hc": entry_px,
+                              "sh": sh}
+            entries_today += 1
+        mtm = equity
+        for sym, p in positions.items():
+            b = _bar(all_bars[sym], today)
+            if b:
+                mtm += p["sh"] * (b["c"] - p["e"])
+        curve.append(mtm)
+    return curve, trades
 
 try:
     import requests
@@ -255,6 +359,9 @@ def main():
             curve, trades = run_config(bars, dates, variant, simple,
                                        100_000, cost)
             rows[name] = stats(curve, trades, years)
+    curve, trades = run_filtered_breakout(bars, dates, 100_000, cost)
+    rows["filt_brkout"] = stats(curve, trades, years)
+
     if "SPY" in bars:
         spy = [b["c"] for b in bars["SPY"]]
         curve = [100_000 * c / spy[0] for c in spy]
