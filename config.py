@@ -188,7 +188,9 @@ SOURCE_TO_SYSTEM: dict[SignalSource, System] = {
 }
 
 # ---------------------------------------------------------------------------
-# Universe: ~36 liquid large-caps across 8 sectors. The old 16-name list was
+# Universe: 68 liquid large-caps across 14 sectors (63 + the 2026-07-22
+# additions: ABBV, MRK healthcare depth; PGR insurer; CME exchange; DHI
+# homebuilder — operator decision, breadth-first). The old 16-name list was
 # almost all mega-cap tech -- one correlated pond, which undermined strategy
 # diversification and made the cross-sectional top-3 ranking nearly meaningless.
 # Override with env UNIVERSE / INTRADAY_UNIVERSE (comma-separated).
@@ -198,13 +200,13 @@ UNIVERSE = os.environ.get(
     # tech / semis
     "AAPL,MSFT,NVDA,AMD,AVGO,CRM,INTC,PLTR,"
     # consumer / retail
-    "AMZN,TSLA,WMT,COST,HD,MCD,NKE,DIS,"
+    "AMZN,TSLA,WMT,COST,HD,MCD,NKE,DIS,DHI,"
     # communication / media
     "GOOGL,META,NFLX,T,"
     # financials
-    "JPM,BAC,GS,V,MA,"
+    "JPM,BAC,GS,V,MA,PGR,CME,"
     # healthcare
-    "UNH,JNJ,LLY,PFE,"
+    "UNH,JNJ,LLY,PFE,ABBV,MRK,"
     # energy
     "XOM,CVX,COP,"
     # industrials
