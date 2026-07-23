@@ -98,6 +98,30 @@ def build():
     log.warning("strategy profile: enabled=%s | benched=%s",
                 sorted(ENABLED_SYSTEMS),
                 sorted({s.value for s in System} - ENABLED_SYSTEMS))
+    # GATE BANNER (2026-07-23): every safety flag, stated at boot, from the
+    # ACTUAL module constants the engines use — never from re-read env vars
+    # that could drift from them. Exists because a status summarizer had to
+    # guess INTRADAY_ENTRIES ("40% confidence") and guessed the sector cap
+    # wrong; flags must be log-visible facts, not inferences.
+    try:
+        from swing_engine import SWING_ENTRIES as _sw
+        from intraday_engine import INTRADAY_ENTRIES as _ie, \
+            INTRADAY_V2_GATE as _v2
+        from xsection import XSECT_SECTOR_CAP as _cap
+        import meanrev_scoring as _mrs
+        import regime as _rg
+        log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
+                    "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
+                    "REGIME_FILTER=%s MEANREV_SCORING=%s "
+                    "MEANREV_SCORE_MIN=%d",
+                    _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
+                    _mrs.SCORE_MIN)
+        if _ie and "intraday" in ENABLED_SYSTEMS:
+            log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
+                         "unset or true). If shadow mode was intended, set "
+                         "INTRADAY_ENTRIES=false NOW.")
+    except Exception as e:  # noqa: BLE001 — banner must never block boot
+        log.error("gate banner failed (non-fatal): %s", e)
     return feed, broker, logger, kill, swing, intraday, meanrev, xsect, router, scanner, engines
 
 
