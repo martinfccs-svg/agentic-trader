@@ -43,3 +43,4 @@ env/
 # NOTE (deliberate non-entry): universe.txt is versioned on purpose — it is
 # an INPUT (the backtest symbol list), not an artifact; keeping it in Git
 # makes every replay command reproducible from a fresh clone.
+
