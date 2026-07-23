@@ -20,13 +20,18 @@ SAFETY MODEL (same philosophy as the bot):
 USAGE (env: ALPACA_API_KEY / ALPACA_SECRET_KEY, or APCA_* names;
        APCA_API_BASE_URL defaults to the paper endpoint):
 
-  python protect.py UNH                       # dry run: show plan
-  python protect.py UNH --confirm             # place the GTC stop
-  python protect.py UNH --stop 420 --confirm  # place at your price
-  python protect.py UNH --close --confirm     # instead: queue a market
-                                              # SELL (fills at next open)
-                                              # — the 'close it entirely'
-                                              # branch of the decision
+  python protect.py UNH                        # dry run: show plan
+  python protect.py UNH --confirm              # place the GTC stop
+  python protect.py UNH --stop 420 --confirm   # place at your price
+  python protect.py UNH --close --confirm      # queue a market SELL
+                                               # (fills at next open)
+
+  BATCH (2026-07-23): several tickers in one command. Each is handled
+  independently — a failure on one does NOT abandon the rest half-done
+  (the Jul-6 flatten lesson), and a summary prints at the end.
+
+  python protect.py UNP PLD UNH UPS --close            # dry run all four
+  python protect.py UNP PLD UNH UPS --close --confirm  # queue all four
 """
 
 from __future__ import annotations
@@ -59,24 +64,16 @@ def get(url, **params):
     return r.json()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("ticker")
-    ap.add_argument("--stop", type=float, help="explicit stop price")
-    ap.add_argument("--close", action="store_true",
-                    help="queue a market SELL of the whole position instead "
-                         "of placing a stop (fills at next open)")
-    ap.add_argument("--confirm", action="store_true",
-                    help="actually submit; without this, dry run only")
-    a = ap.parse_args()
-    t = a.ticker.upper()
-
+def handle(t: str, a) -> str:
+    """Process ONE ticker. Returns a short status for the batch summary.
+    Never raises or exits: in a batch, one ticker's problem must not
+    abandon the others half-done (the Jul-6 flatten lesson)."""
     # 1) position must exist
     try:
         pos = get(f"{TRADE}/v2/positions/{t}")
     except requests.HTTPError:
-        sys.exit(f"No open position in {t} at this account/endpoint "
-                 f"({TRADE}). Nothing to protect.")
+        print(f"{t}: NO OPEN POSITION at this account/endpoint ({TRADE}).")
+        return f"{t}: skipped (no position)"
     qty = abs(float(pos["qty"]))
     entry = float(pos["avg_entry_price"])
     cur = float(pos.get("current_price") or entry)
@@ -103,7 +100,7 @@ def main():
                           f"id={leg['id'][:8]} type={leg['type']} "
                           f"stop={leg.get('stop_price')} "
                           f"qty={leg.get('qty')}. Not duplicating; done.")
-                    return
+                    return f"{t}: stop already exists ({leg.get('stop_price')})"
 
     if a.close:
         order = {"symbol": t, "qty": str(qty), "side": "sell",
@@ -130,7 +127,8 @@ def main():
             bars = get(f"{DATA}/bars", symbols=t, timeframe="1Day",
                        start=start, limit=1000)["bars"].get(t, [])
             if len(bars) < 15:
-                sys.exit("Not enough bars to propose a stop — pass --stop.")
+                print(f"{t}: not enough bars to propose a stop — pass --stop.")
+                return f"{t}: SKIPPED (no bars for proposal)"
             trs = []
             for i in range(len(bars) - 14, len(bars)):
                 h, l, pc = bars[i]["h"], bars[i]["l"], bars[i - 1]["c"]
@@ -141,9 +139,10 @@ def main():
             print(f"proposed stop = last close {last_close:.2f} "
                   f"- 2.5 x ATR14 {atr14:.2f} = {stop_px:.2f}")
         if stop_px >= cur:
-            sys.exit(f"REFUSED: stop {stop_px:.2f} >= current price "
-                     f"{cur:.2f} would fill instantly (the Jul-16 bug "
-                     "class). Pass a lower --stop.")
+            print(f"REFUSED: stop {stop_px:.2f} >= current price "
+                  f"{cur:.2f} would fill instantly (the Jul-16 bug "
+                  "class). Pass a lower --stop.")
+            return f"{t}: REFUSED (stop >= price)"
         order = {"symbol": t, "qty": str(qty), "side": "sell",
                  "type": "stop", "stop_price": str(stop_px),
                  "time_in_force": "gtc",
@@ -156,26 +155,68 @@ def main():
     if not a.confirm:
         print("\nDRY RUN — nothing submitted. Re-run with --confirm to "
               "place this order.")
-        return
+        return f"{t}: dry run (nothing submitted)"
     if a.close and blocking:
         for o in blocking:
             rc = requests.delete(f"{TRADE}/v2/orders/{o['id']}",
                                  headers=auth(), timeout=15)
             if rc.status_code >= 400 and rc.status_code != 404:
-                sys.exit(f"Cancel of order {o['id'][:8]} FAILED "
-                         f"{rc.status_code}: {rc.text[:200]} — aborting "
-                         "before the sell (shares would still be held).")
+                print(f"Cancel of order {o['id'][:8]} FAILED "
+                      f"{rc.status_code}: {rc.text[:200]} — NOT selling "
+                      "(shares would still be held by the leg).")
+                return f"{t}: FAILED (cancel rejected; position untouched)"
             print(f"cancelled {o['id'][:8]}")
     r = requests.post(f"{TRADE}/v2/orders",
                       headers={**auth(), "Content-Type": "application/json"},
                       data=json.dumps(order), timeout=15)
     if r.status_code >= 400:
-        sys.exit(f"Order REJECTED {r.status_code}: {r.text[:300]}")
+        print(f"Order REJECTED {r.status_code}: {r.text[:300]}")
+        return f"{t}: FAILED (order rejected)"
     j = r.json()
     print(f"SUBMITTED: id={j['id'][:8]} status={j['status']} "
           f"type={j['type']} tif={j['time_in_force']}")
-    print("Verify anytime:  python protect.py", t, " (will report the "
-          "existing stop and refuse to duplicate)")
+    kind = "market SELL queued" if a.close else "GTC stop placed"
+    return f"{t}: {kind} (id={j['id'][:8]}, {j['status']})"
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Place GTC protective stops or queue closes via the "
+                    "Alpaca API. Dry run unless --confirm. Multiple tickers "
+                    "may be given; each is handled independently.")
+    ap.add_argument("tickers", nargs="+",
+                    help="one or more symbols, e.g. UNP PLD UNH UPS")
+    ap.add_argument("--stop", type=float,
+                    help="explicit stop price (single ticker only)")
+    ap.add_argument("--close", action="store_true",
+                    help="queue a market SELL of the whole position instead "
+                         "of placing a stop (fills at next open)")
+    ap.add_argument("--confirm", action="store_true",
+                    help="actually submit; without this, dry run only")
+    a = ap.parse_args()
+    tickers = [t.upper() for t in a.tickers]
+    if a.stop is not None and len(tickers) > 1:
+        sys.exit("--stop takes an explicit price and cannot apply to "
+                 "multiple tickers. Run them one at a time.")
+    auth()   # fail fast on missing credentials, before touching anything
+
+    results = []
+    for i, t in enumerate(tickers):
+        if i:
+            print("\n" + "-" * 62)
+        try:
+            results.append(handle(t, a))
+        except Exception as e:  # noqa: BLE001 — one ticker must not abort
+            print(f"{t}: UNEXPECTED ERROR: {e}")
+            results.append(f"{t}: FAILED ({type(e).__name__})")
+
+    if len(tickers) > 1 or not a.confirm:
+        print("\n" + "=" * 62)
+        print("SUMMARY" + ("" if a.confirm else "  (DRY RUN — nothing sent)"))
+        for r in results:
+            print("  " + r)
+        if not a.confirm:
+            print("\nRe-run with --confirm to submit.")
 
 
 if __name__ == "__main__":
