@@ -9,6 +9,22 @@ trades.jsonl
 backtest_trades.jsonl
 *.log
 
+# --- Volume snapshots pulled locally (autopsy / debugging) ---
+# `cat /data/audit.jsonl > audit.jsonl` copies land here; they are account
+# activity and never belong in the repo. The live files are on Railway's
+# /data volume and were never in Git — this guards the LOCAL copies.
+audit.jsonl
+position_state.json
+swing_v2_state.json
+rebalance_gate_state*
+
+# --- Archive bundles ---
+agentic-trader-complete-*.zip
+
+# --- Backtest outputs / downloaded history ---
+backtest_signals.jsonl
+history/
+
 # --- Python ---
 __pycache__/
 *.py[cod]
@@ -24,8 +40,6 @@ env/
 .idea/
 .vscode/
 
-backtest_signals.jsonl
-
-history/
-
-# backtest outputs / downloaded history
+# NOTE (deliberate non-entry): universe.txt is versioned on purpose — it is
+# an INPUT (the backtest symbol list), not an artifact; keeping it in Git
+# makes every replay command reproducible from a fresh clone.
