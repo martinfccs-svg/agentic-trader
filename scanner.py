@@ -189,3 +189,4 @@ class PriceActionScanner:
 
     def scan_all(self) -> list[Signal]:
         return self.scan_swing() + self.scan_intraday() + self.scan_meanrev()
+
