@@ -83,28 +83,44 @@ def main():
     print(f"{t}: {qty:g} shares, entry {entry:.2f}, last {cur:.2f}, "
           f"unrealized {float(pos.get('unrealized_pl') or 0):+.2f}")
 
-    # 2) refuse to duplicate an existing protective order
+    # 2) inspect open orders. In STOP mode an existing sell-stop means
+    #    "done, don't duplicate". In CLOSE mode those same orders are
+    #    OBSTACLES: their legs hold the shares, so the market sell would be
+    #    rejected — they must be cancelled first (brokers.py's own
+    #    legs-first pattern).
     open_orders = get(f"{TRADE}/v2/orders", status="open", symbols=t,
                       limit=100, nested="true")
-    for o in open_orders:
-        legs = [o] + (o.get("legs") or [])
-        for leg in legs:
-            if (leg.get("symbol") == t and leg.get("side") == "sell"
-                    and "stop" in str(leg.get("type", ""))):
-                print(f"An open sell-stop ALREADY EXISTS: id={leg['id'][:8]} "
-                      f"type={leg['type']} stop={leg.get('stop_price')} "
-                      f"qty={leg.get('qty')}. Not duplicating; done.")
-                return
+    blocking = [o for o in open_orders
+                if any(leg.get("symbol") == t and leg.get("side") == "sell"
+                       for leg in [o] + (o.get("legs") or []))]
+    if not a.close:
+        for o in open_orders:
+            legs = [o] + (o.get("legs") or [])
+            for leg in legs:
+                if (leg.get("symbol") == t and leg.get("side") == "sell"
+                        and "stop" in str(leg.get("type", ""))):
+                    print(f"An open sell-stop ALREADY EXISTS: "
+                          f"id={leg['id'][:8]} type={leg['type']} "
+                          f"stop={leg.get('stop_price')} "
+                          f"qty={leg.get('qty')}. Not duplicating; done.")
+                    return
 
     if a.close:
         order = {"symbol": t, "qty": str(qty), "side": "sell",
                  "type": "market", "time_in_force": "day",
                  "client_order_id":
                      f"manual-close-{t}-{datetime.now():%Y%m%d%H%M}"}
-        print(f"\nPLAN: queue MARKET SELL {qty:g} {t} (day order — fills at "
+        print(f"\nPLAN: ", end="")
+        if blocking:
+            print(f"cancel {len(blocking)} open order(s) whose sell legs "
+                  f"hold the shares ("
+                  + ", ".join(o['id'][:8] for o in blocking)
+                  + "), THEN ", end="")
+        print(f"queue MARKET SELL {qty:g} {t} (day order — fills at "
               "next market open). Reconcile will book it as a manual close; "
               "realized P&L lands in the audit trail via the closing-fill "
-              "search.")
+              "search. The cancelled stop is moot once the position is "
+              "gone.")
     else:
         stop_px = a.stop
         if stop_px is None:
@@ -141,6 +157,15 @@ def main():
         print("\nDRY RUN — nothing submitted. Re-run with --confirm to "
               "place this order.")
         return
+    if a.close and blocking:
+        for o in blocking:
+            rc = requests.delete(f"{TRADE}/v2/orders/{o['id']}",
+                                 headers=auth(), timeout=15)
+            if rc.status_code >= 400 and rc.status_code != 404:
+                sys.exit(f"Cancel of order {o['id'][:8]} FAILED "
+                         f"{rc.status_code}: {rc.text[:200]} — aborting "
+                         "before the sell (shares would still be held).")
+            print(f"cancelled {o['id'][:8]}")
     r = requests.post(f"{TRADE}/v2/orders",
                       headers={**auth(), "Content-Type": "application/json"},
                       data=json.dumps(order), timeout=15)
@@ -155,3 +180,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
