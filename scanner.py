@@ -165,9 +165,14 @@ class PriceActionScanner:
             if scoring == "live":
                 if card and card.qualifies() and market_ok:
                     f.count("uptrend"); f.count("oversold"); f.count("scored")
+                    # Attach the card so the engine can size by conviction
+                    # (2026-07-24). Without this the scorecard died at the
+                    # scanner boundary and mrs.risk_multiplier() could never
+                    # fire, even in live mode.
                     out.append(Signal(SignalSource.MEAN_REVERSION, t,
                                       reason=f"RSI={r:.1f} score={card.score}/6 "
-                                             f">EMA200"))
+                                             f">EMA200",
+                                      raw={"card": card}))
                 continue
 
             # ---- current rule (off + shadow modes): unchanged behavior ----
