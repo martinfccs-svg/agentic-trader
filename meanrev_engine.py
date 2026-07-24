@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from config import MEANREV, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import rsi
 import meanrev_scoring as mrs
+import portfolio_risk
 from models import Action, Signal, System
 from risk import position_size
 from safety import market_is_open
@@ -74,6 +75,14 @@ class MeanReversionEngine:
         if self._open() >= MEANREV.max_positions or signal.ticker in self._broker.positions:
             self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK)
             return
+        # Portfolio heat (2026-07-24): total open risk across ALL strategies,
+        # not just this one. MEASURE-ONLY unless PORTFOLIO_HEAT_MAX > 0, so
+        # this changes nothing until you have watched the numbers.
+        heat_ok, heat_why = portfolio_risk.check(self._broker, System.MEANREV)
+        if not heat_ok:
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK,
+                             heat_why)
+            return
         q = self._feed.get_quote(signal.ticker)
         if q is None or q.atr is None:
             self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK, "no quote/atr")
@@ -85,6 +94,19 @@ class MeanReversionEngine:
         stop = q.price - MEANREV.atr_stop_multiple * q.atr
         shares = position_size(self._broker.equity, q.price, stop,
                                getattr(self._broker, "cash", 1e12))
+        # Conviction sizing (2026-07-24): only in live scoring mode, where a
+        # scorecard actually gated the entry. Scales the SHARE COUNT, never
+        # the equity passed to position_size — scaling equity would also
+        # scale the 10%-of-equity notional cap, loosening a risk limit as a
+        # side effect of a sizing preference.
+        if mrs.SCORING_MODE == "live":
+            card = getattr(signal, "raw", {}).get("card") if signal.raw else None
+            if card is not None:
+                mult = mrs.risk_multiplier(card.score)
+                shares = shares * mult
+                log.info("meanrev conviction sizing %s: score=%d/6 "
+                         "mult=%.2f shares=%.2f", signal.ticker, card.score,
+                         mult, shares)
         if shares <= 0:
             self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK, "size=0")
             return
@@ -163,7 +185,8 @@ class MeanReversionEngine:
                     atr14=q.atr, ema200=e200, last_close=bars.close[-1],
                     rsi_value=r, rsi_exit=MEANREV.rsi_exit,
                     held_days=held,
-                    time_stop_days=MEANREV_TIME_STOP_DAYS)
+                    time_stop_days=MEANREV_TIME_STOP_DAYS,
+                    atr_stop_multiple=MEANREV.atr_stop_multiple)
                 if new_stop > pos.stop_price:
                     pos.stop_price = new_stop
                 if ladder_reason and market_is_open():
