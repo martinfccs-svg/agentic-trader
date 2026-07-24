@@ -808,12 +808,26 @@ class AlpacaBroker:
         # (bracket child legs get auto-generated ids, so scan ALL statuses).
         sys_by_ticker: dict[str, System] = {}
         stop_by_ticker: dict[str, float] = {}
-        try:
-            todays = self._client.get_orders(GetOrdersRequest(
-                status=QueryOrderStatus.ALL, limit=500, nested=True))
-        except Exception as e:  # noqa: BLE001
-            log.error("[ALPACA] reconcile: cannot list orders: %s", e)
-            todays = []
+        # Order listing is the PRIMARY attribution source. A transient
+        # failure here used to be indistinguishable from "this account has
+        # no bot orders" — on 2026-07-23 23:47 Alpaca returned a 500
+        # (code 50010000) and reconcile declared ALL SIX healthy positions
+        # orphans, halting with "resolve in the Alpaca dashboard" for a
+        # problem that did not exist there. Retry first; remember whether
+        # the listing actually succeeded.
+        todays = []
+        listing_ok = False
+        for attempt in range(3):
+            try:
+                todays = self._client.get_orders(GetOrdersRequest(
+                    status=QueryOrderStatus.ALL, limit=500, nested=True))
+                listing_ok = True
+                break
+            except Exception as e:  # noqa: BLE001
+                log.error("[ALPACA] reconcile: cannot list orders "
+                          "(attempt %d/3): %s", attempt + 1, e)
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
         for o in todays:
             coid = getattr(o, "client_order_id", "") or ""
             if coid.startswith("bot-"):
@@ -872,9 +886,24 @@ class AlpacaBroker:
                              "position registry", ticker, system.value)
             if system is None:
                 orphans.append(ticker)
-                log.critical("[ALPACA] reconcile: ORPHAN %s x%s — no bot "
-                             "order found; resolve manually before trading",
-                             ticker, p.qty)
+                if listing_ok:
+                    log.critical("[ALPACA] reconcile: ORPHAN %s x%s — no bot "
+                                 "order found; resolve manually before "
+                                 "trading", ticker, p.qty)
+                else:
+                    # The order API failed, so "no bot order found" is NOT
+                    # evidence of an orphan — it is evidence of nothing.
+                    # Halt anyway (never trade without knowing broker
+                    # state), but say the true reason: this clears itself
+                    # when the broker API recovers, and the dashboard is
+                    # not where it gets fixed.
+                    log.critical("[ALPACA] reconcile: UNVERIFIED %s x%s — "
+                                 "broker order API is failing, so system "
+                                 "attribution could not be checked. This is "
+                                 "NOT necessarily an orphan. Halting until "
+                                 "the API recovers; no dashboard action "
+                                 "needed. (Registry had no entry for this "
+                                 "ticker either.)", ticker, p.qty)
                 continue
             entry = float(p.avg_entry_price)        # broker fill = truth
             qty = float(p.qty)
