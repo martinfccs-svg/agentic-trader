@@ -69,6 +69,12 @@ ATR_FAST, ATR_SLOW = 7, 21
 RS_LOOKBACK = int(os.getenv("MEANREV_RS_LOOKBACK", "63"))
 EMA_FAST, EMA_SLOW = 50, 200
 TRAIL_ATR_MULT = float(os.getenv("MEANREV_TRAIL_ATR", "2.0"))
+# Emergency volatility exit (2026-07-24): if realised volatility expands far
+# beyond what the position was sized for, the environment that justified the
+# trade is gone. Entry ATR is DERIVED, not stored — (entry - entry_stop) /
+# atr_stop_multiple — because per-position attributes do not survive a
+# redeploy and this bot redeploys several times a week. 0 disables.
+VOL_EXIT_MULT = float(os.getenv("MEANREV_VOL_EXIT_MULT", "1.8"))
 
 
 # ------------------------------------------------------------- indicators
@@ -197,16 +203,36 @@ def score_candidate(ticker: str, close: list[float], high: list[float],
     )
 
 
+def risk_multiplier(score: int, score_min: int = SCORE_MIN) -> float:
+    """Conviction sizing: full risk only for the strongest cards.
+    6/6 -> 1.00, one above threshold -> 0.75, at threshold -> 0.50.
+    Applied ONLY when MEANREV_SCORING=live; shadow sizing is unchanged."""
+    if score >= MAX_SCORE:
+        return 1.0
+    if score >= score_min + 1:
+        return 0.75
+    return 0.5
+
+
 # ------------------------------------------------------------ exit ladder
 def ladder_decision(price: float, entry: float, entry_stop: float,
                     stop: float, high_water: float, atr14: Optional[float],
                     ema200: Optional[float], last_close: float,
                     rsi_value: Optional[float], rsi_exit: float,
-                    held_days: int, time_stop_days: int
+                    held_days: int, time_stop_days: int,
+                    atr_stop_multiple: Optional[float] = None
                     ) -> tuple[float, Optional[str]]:
     """One management pass. Returns (new_stop, exit_reason|None).
-    Priority: stop touch > final RSI > trend reversal > time. Stop only
-    ever ratchets UP (breakeven, then ATR trail) — never widens."""
+
+    Priority (first match wins):
+        stop touch > volatility emergency > final RSI > trend reversal > time
+    Stop only ever ratchets UP (breakeven, then ATR trail) — never widens.
+
+    Derived state, nothing stored on the Position (redeploy-proof):
+        initial risk  = entry - entry_stop
+        breakeven hit = implied by the ratchet below
+        entry ATR     = initial risk / atr_stop_multiple
+    """
     r = entry - entry_stop
     new_stop = stop
     if r > 0 and price >= entry + r:                       # L1: >= +1R
@@ -215,6 +241,15 @@ def ladder_decision(price: float, entry: float, entry_stop: float,
             new_stop = max(new_stop, high_water - TRAIL_ATR_MULT * atr14)
     if price <= new_stop:
         return new_stop, "stop"
+    # L2b: emergency volatility exit — the trade was sized for entry-ATR; if
+    # current ATR has expanded past VOL_EXIT_MULT x that, the regime the
+    # thesis assumed no longer exists. Ranked directly under the hard stop.
+    if (VOL_EXIT_MULT and atr14 is not None and atr_stop_multiple
+            and atr_stop_multiple > 0 and r > 0):
+        entry_atr = r / atr_stop_multiple
+        if entry_atr > 0 and atr14 > VOL_EXIT_MULT * entry_atr:
+            return new_stop, (f"volatility_expansion(atr {atr14:.2f} > "
+                              f"{VOL_EXIT_MULT:.1f}x entry {entry_atr:.2f})")
     if rsi_value is not None and rsi_value >= rsi_exit:    # L5: final exit
         return new_stop, f"rsi_reverted({rsi_value:.1f}>={rsi_exit:.0f})"
     if ema200 is not None and last_close < ema200:         # L4: trend rev.
