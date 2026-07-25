@@ -13,6 +13,7 @@ import audit
 from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
 from models import Action, Signal, System
 from risk import position_size
+import regime_allocation
 from safety import market_is_open
 
 log = logging.getLogger("swing")
@@ -81,6 +82,15 @@ class SwingRiskEngine:
         stop = q.price - SWING.atr_stop_multiple * q.atr
         shares = position_size(self._broker.equity, q.price, stop,
                                getattr(self._broker, "cash", 1e12))
+        # Regime allocation (2026-07-24): scale SHARES, not the equity passed
+        # to position_size — scaling equity would also scale the 10%-notional
+        # cap, loosening a risk limit as a side effect of a sizing decision.
+        # Returns 1.0 unless REGIME_ALLOC=live.
+        shares, _alloc = regime_allocation.apply_to_shares(
+            shares, self._feed, "swing", self._broker.equity, q.price)
+        if _alloc != 1.0:
+            log.info("swing regime sizing %s: x%.2f -> shares=%.2f",
+                     signal.ticker, _alloc, shares)
         if shares <= 0:
             self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK, "size=0")
             return
