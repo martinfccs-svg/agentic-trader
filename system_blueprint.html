@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Trader — Whole-Machine Blueprint</title>
+<style>
+  :root{--ink:#1e2126;--soft:#5b626d;--line:#dde2e8;--bg:#fbfcfd;--card:#fff;
+        --cio:#6d4aa8;--sig:#4a5fc1;--risk:#a05a00;--exec:#1a6b4f;--mem:#2d7a8a;--warn:#b23b3b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:1000px;margin:0 auto;padding:44px 22px 90px}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
+  .date{color:var(--soft);font-size:14px;margin:0 0 8px}
+  .lede{font-size:17px;color:#3a4048;margin:0 0 30px;max-width:78ch}
+  h2{font-size:20px;margin:40px 0 12px;padding-top:18px;border-top:1px solid var(--line)}
+  h3{font-size:15.5px;margin:0 0 6px}
+  p{margin:0 0 12px}
+  .soft{color:var(--soft)}
+  code{background:#eef1f5;border:1px solid var(--line);border-radius:4px;
+       padding:1px 5px;font:13px ui-monospace,Menlo,Consolas,monospace}
+  /* layer stack */
+  .layer{border:1px solid var(--line);border-radius:12px;background:var(--card);
+         padding:16px 18px;margin:0 0 12px;position:relative;overflow:hidden}
+  .layer:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px}
+  .l-cio:before{background:var(--cio)} .l-sig:before{background:var(--sig)}
+  .l-risk:before{background:var(--risk)} .l-exec:before{background:var(--exec)}
+  .l-mem:before{background:var(--mem)} .l-data:before{background:#8a8f98}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+       color:#fff;border-radius:20px;padding:2px 10px;margin-bottom:8px}
+  .t-cio{background:var(--cio)} .t-sig{background:var(--sig)} .t-risk{background:var(--risk)}
+  .t-exec{background:var(--exec)} .t-mem{background:var(--mem)} .t-data{background:#8a8f98}
+  .flowdown{text-align:center;color:var(--soft);font-size:20px;margin:-4px 0 8px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:10px}
+  .box{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fcfdfe;font-size:13.5px}
+  .box b{display:block;font-size:13.5px;margin-bottom:2px}
+  .box .st{font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
+  .live{color:var(--exec);font-weight:600} .shadow{color:var(--sig);font-weight:600}
+  .dormant{color:var(--soft);font-weight:600}
+  table{border-collapse:collapse;width:100%;margin:12px 0 6px;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:#f2f4f7;font-weight:600}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .hi{background:#f4f0fb}
+  .note{border-left:4px solid var(--warn);background:#fff;padding:11px 13px;
+        border-radius:0 8px 8px 0;margin:12px 0;font-size:14px}
+  ul{margin:0 0 12px 20px;padding:0} li{margin:0 0 6px}
+  .legend{font-size:12.5px;color:var(--soft);margin:0 0 18px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin:0 5px 0 14px;vertical-align:-1px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Agentic Trader — whole-machine blueprint</h1>
+  <p class="date">Complete system architecture including the regime allocation layer · 2026-07-24</p>
+  <p class="lede">Six layers, one direction of flow. The top layer decides <i>how hard</i>
+  each desk may push; the middle layers decide <i>what</i> to trade and <i>whether risk allows it</i>;
+  the bottom layers <i>execute</i> and <i>remember</i>. Nothing skips a layer, and every
+  behavioural switch is an environment variable rather than a code change.</p>
+
+  <p class="legend">Layers:
+    <i style="background:#6d4aa8"></i>allocation (CIO)
+    <i style="background:#4a5fc1"></i>signal
+    <i style="background:#a05a00"></i>risk
+    <i style="background:#1a6b4f"></i>execution
+    <i style="background:#2d7a8a"></i>memory
+    <i style="background:#8a8f98"></i>data
+  </p>
+
+  <!-- DATA -->
+  <div class="layer l-data">
+    <span class="tag t-data">Layer 0 · Data</span>
+    <h3>Two independent pipes, one scale contract</h3>
+    <p class="soft">Finnhub (paid) serves every live strategy: daily bars, 1-minute bars,
+    quotes — behind a rate limiter and per-endpoint circuit breakers. Alpaca's free data API
+    separately feeds swing_v2 and all local backtests, because Finnhub bars carry no OPEN
+    prices and candle patterns cannot exist without them. Contract enforced at this boundary:
+    <b>risk numbers come from daily bars; only the intraday engine may use 1-minute scale.</b></p>
+    <div class="grid">
+      <div class="box"><b>feed_layer.py</b><span class="soft">rate limiter · breakers · slow-TTL daily cache</span></div>
+      <div class="box"><b>indicators.py</b><span class="soft">EMA/SMA · ATR · RSI · VWAP · rel-vol · trailing return</span></div>
+      <div class="box"><b>sector_map.py</b><span class="soft">68 names → 13 sectors (tech + emerging compute merged)</span></div>
+    </div>
+  </div>
+  <div class="flowdown">↓</div>
+
+  <!-- CIO -->
+  <div class="layer l-cio">
+    <span class="tag t-cio">Layer 1 · Allocation — the CIO</span>
+    <h3>regime_allocation.py — classifies the market, sizes the desks</h3>
+    <p>Generates no signals and opens no positions. Once per day it answers: given the market
+    state, how aggressive should each strategy be? Every input is measured from bars the
+    scanners already cached — zero extra API calls:</p>
+    <ul>
+      <li><b>Trend</b> — EMA50 vs EMA200 separated ≥1%, price vs EMA200, a tolerant 20-day
+        slope, <b>and ADX ≥ 20</b>. ADX gates strength in <i>both</i> directions: a
+        structurally-ordered but momentum-less market is drift, and drift belongs in SIDEWAYS.
+        Missing ADX never vetoes.</li>
+      <li><b>Volatility</b> — SPY ATR% vs its own 100-day median (realized, not implied), and it
+        must <b>persist</b>: a single shock day logs as <code>SPIKE</code> and does not
+        re-allocate; only sustained elevation becomes <code>VOLATILE</code>.</li>
+      <li><b>Breadth</b> — three participation measures: % of the 68 above their own EMA50, %
+        above EMA200, and <b>share of sectors leading</b> (a majority of members above EMA50).
+        The sector measure is what separates a broad advance from narrow leadership — a raw
+        name-count can be carried by one crowded sector.</li>
+    </ul>
+    <p><b>Persistence</b> — a label becomes effective only after
+    <code>REGIME_PERSIST_DAYS</code> (default 3) consecutive sessions agree on it;
+    until then the last confirmed regime stays in force. Implemented <b>statelessly</b>: the
+    previous sessions are re-classified from the same cached bars rather than tracked in a
+    counter, because per-run state does not survive a redeploy — the same history always yields
+    the same effective regime. A one-day shock is logged and ignored; a real change takes effect
+    on its third session.</p>
+    <p><b>Confidence (0–100)</b> scores how decisively each factor reads — distance from its own
+    threshold, not a probability. Multipliers are then <b>blended toward 1.00 in proportion to
+    confidence</b>: a fresh, weakly-evidenced regime barely moves sizing, and the lean grows as
+    the evidence does. That gives gradual transitions <i>without</i> a calendar — chosen over
+    day-by-day interpolation because it is stateless (nothing to reset on redeploy) and because
+    transition speed should be driven by evidence rather than an arbitrary schedule.</p>
+    <table>
+      <tr><th>Regime</th><th class="n">swing</th><th class="n">pullback</th><th class="n">meanrev</th><th class="n">intraday</th><th class="n">xsectmom</th></tr>
+      <tr><td>STRONG_BULL</td><td class="n">1.25</td><td class="n">1.35</td><td class="n">0.50</td><td class="n">0.75</td><td class="n">1.40</td></tr>
+      <tr class="hi"><td><b>WEAK_BULL</b> (baseline)</td><td class="n">1.00</td><td class="n">1.00</td><td class="n">1.00</td><td class="n">1.00</td><td class="n">1.00</td></tr>
+      <tr><td>SIDEWAYS</td><td class="n">0.50</td><td class="n">0.50</td><td class="n">1.50</td><td class="n">1.25</td><td class="n">0.75</td></tr>
+      <tr><td>BEAR</td><td class="n">0.25</td><td class="n">0.25</td><td class="n">0.75</td><td class="n">0.75</td><td class="n">0.50</td></tr>
+      <tr><td>HIGH_VOL</td><td class="n">0.25</td><td class="n">0.25</td><td class="n">0.50</td><td class="n">0.50</td><td class="n">0.50</td></tr>
+    </table>
+    <p class="soft">STRONG_BULL leans hardest on cross-sectional momentum and pullback, the
+    strategies that benefit most from broad persistent advances — an unvalidated preference,
+    flagged as such. Cells are <b>multipliers on sizing an engine already computed</b>, not target
+    capital percentages — normalised so the ordinary state (WEAK_BULL) is 1.00 everywhere.
+    Consequence: switching this on in a normal market changes nothing; it only leans in or out
+    as conditions leave the middle. Floor 0.25 — a regime may shrink a desk but never halt one
+    (halting belongs to the risk-off gate and the kill switch: one mechanism per job).</p>
+    <div class="note"><b>Status: shadow.</b> <code>REGIME_ALLOC=shadow</code> classifies and
+    logs the multipliers while applying none of them. The percentages are a hypothesis — the
+    proposal that suggested them said as much — so they earn their way to <code>live</code>
+    on logged evidence, like every other switch in this system.</div>
+  </div>
+  <div class="flowdown">↓</div>
+
+  <!-- SIGNAL -->
+  <div class="layer l-sig">
+    <span class="tag t-sig">Layer 2 · Signal — five strategies, four live</span>
+    <h3>Scanners and engines</h3>
+    <p class="soft">One scanner pass per cycle produces funnel lines that name the gate which
+    killed every candidate — the reason a "zero-signal" day is explainable rather than
+    suspicious. Each engine then applies its own gates before the broker sees anything.</p>
+    <div class="grid">
+      <div class="box"><b>swing</b><span class="st live">live</span>
+        <span class="soft">20-day breakout + 50-SMA trend + 1.3× volume. Bench gate
+        (<code>SWING_ENTRIES</code>) logs full-fidelity shadow trades when off.</span></div>
+      <div class="box"><b>intraday</b><span class="st live">live (v2-gated)</span>
+        <span class="soft">1-min momentum. Time windows 9:35–11:15 / 13:30–15:30, SPY&gt;VWAP
+        and &gt;EMA50, rv≥2.0, ATR% band, weighted score ≥0.70, structure stop, score-tiered
+        size, 45-min loss cooldown with EMA20 early release.</span></div>
+      <div class="box"><b>meanrev</b><span class="st live">live</span>
+        <span class="soft">RSI&lt;30 above EMA200 + regime risk-on + 6-factor score ≥4.
+        Exit ladder: breakeven → ATR trail → volatility emergency → trend reversal → time →
+        RSI. Conviction sizing.</span></div>
+      <div class="box"><b>xsectmom</b><span class="st live">live</span>
+        <span class="soft">Daily 10:00 rotation, 126-day return skipping 5 days, top-3
+        <b>sector-capped at 1 per sector</b> — proven live: it ejected ARM and AMD from an
+        all-semi top-3.</span></div>
+      <div class="box"><b>swing_v2</b><span class="st shadow">shadow only</span>
+        <span class="soft">20-EMA pullback + candle confirm + structure stop. Refuses live
+        mode in code; own Alpaca data pipe. <b>This is the trend-pullback engine</b> —
+        already built, awaiting its backtest.</span></div>
+      <div class="box"><b>stat-arb</b><span class="st dormant">declined</span>
+        <span class="soft">Pairs research tool shipped; a 14-sector universe yields too few
+        cointegrated pairs to justify shorting + multi-leg positions. Correctly shelved.</span></div>
+    </div>
+  </div>
+  <div class="flowdown">↓</div>
+
+  <!-- RISK -->
+  <div class="layer l-risk">
+    <span class="tag t-risk">Layer 3 · Risk — four independent brakes</span>
+    <h3>Each answers a different question; none substitutes for another</h3>
+    <table>
+      <tr><th>Mechanism</th><th>Question it answers</th><th>Action</th></tr>
+      <tr><td><code>kill_switch</code></td><td>Has today already lost too much? Is the feed dead?</td><td>halt new entries; flatten intraday on price loss</td></tr>
+      <tr><td><code>regime.py</code></td><td>Is the market above its 200-day line?</td><td>hold entries (exits never gated); fails open</td></tr>
+      <tr><td><code>portfolio_risk.py</code></td><td>How much is at risk across <i>all</i> desks at once?</td><td>logs heat; gates only when a ceiling is set. Counts a stopless position at <b>full notional</b> — unprotected is unbounded, not small</td></tr>
+      <tr><td>per-engine caps</td><td>Too many positions in this one strategy?</td><td>reject signal</td></tr>
+    </table>
+    <p class="soft">Sizing chain, in order: 1% equity risk per trade → 10%-of-equity notional
+    cap → regime multiplier → conviction tier. Multipliers scale <b>share counts</b>, never the
+    equity passed to <code>position_size</code> — scaling equity would quietly loosen the
+    notional cap as a side effect of a sizing preference.</p>
+  </div>
+  <div class="flowdown">↓</div>
+
+  <!-- EXEC -->
+  <div class="layer l-exec">
+    <span class="tag t-exec">Layer 4 · Execution</span>
+    <h3>brokers.py → Alpaca — where the scar tissue lives</h3>
+    <ul>
+      <li>Bracket orders: entry + a <b>GTC protective stop resting at the broker 24/7</b>, so positions survive process death.</li>
+      <li>Idempotent client order IDs — a restart cannot duplicate an entry (the Jul-17 double-stack fix).</li>
+      <li>Fill polling: books record real fills, not quote estimates.</li>
+      <li>Boot reconcile: Alpaca is source of truth; true <code>entry_time</code> restored from the registry so holding-period logic survives redeploys; unknown holdings <b>halt</b> rather than trade blind; a failing order API now retries and reports "unverified", not "orphan".</li>
+      <li>Local stops act only while the market is open — firing on a stale after-hours quote is what caused the Jul-16 liquidations.</li>
+      <li><b>Known limits:</b> no shorting, no partial sells. These block stat-arb, layered scale-outs, and partial profit-taking — the one genuine infrastructure project left.</li>
+    </ul>
+  </div>
+  <div class="flowdown">↓</div>
+
+  <!-- MEMORY -->
+  <div class="layer l-mem">
+    <span class="tag t-mem">Layer 5 · Memory &amp; observability</span>
+    <h3>/data volume — the only disk that survives a redeploy</h3>
+    <div class="grid">
+      <div class="box"><b>audit.jsonl</b><span class="soft">every boot, fill, close, halt, regime change, shadow signal (with factor-level scores) → ntfy → phone</span></div>
+      <div class="box"><b>position_state.json</b><span class="soft">system attribution, true entry time, stops</span></div>
+      <div class="box"><b>swing_v2_state.json</b><span class="soft">the shadow book</span></div>
+      <div class="box"><b>GATES banner</b><span class="soft">every switch stated at boot, read from the constants the engines actually use</span></div>
+    </div>
+    <p class="soft">Railway purges container logs on redeploy, which is why evidence is mirrored
+    to the volume rather than trusted to stdout. Local tools read from here:
+    <code>autopsy.py</code> (trade diagnosis), <code>backtest_swing_v2.py</code>,
+    <code>backtest_xsect.py</code>, <code>research_pairs.py</code>, <code>protect.py</code>.</p>
+  </div>
+
+  <h2>Design rules the machine obeys</h2>
+  <ul>
+    <li><b>Every new behaviour ships dark.</b> Shadow → live on logged evidence, never on a plausible argument. Six experiments have run this way.</li>
+    <li><b>Overlays fail open.</b> A protective layer that cannot get data reports "no opinion" loudly rather than blocking trading — a safety feature must never become a new deadlock class.</li>
+    <li><b>Derive state, don't store it.</b> Per-position flags reset on redeploy; anything derivable from persisted fields (initial risk, breakeven status, entry ATR, days held) is computed, not saved.</li>
+    <li><b>One mechanism per job.</b> Regimes size, gates halt, caps count, the kill switch stops the day. Overlapping authority is how contradictory exits happen.</li>
+    <li><b>Reducing risk is never gated.</b> Exits, stops, and flattens ignore every entry filter.</li>
+    <li><b>Flags are facts, not inferences.</b> The boot banner states them; no analyst — human or AI — gets to assert a switch state from behaviour.</li>
+  </ul>
+
+  <h2>What the machine still owes itself</h2>
+  <p class="soft">Every item here is evidence or infrastructure, not a new strategy:</p>
+  <ul>
+    <li><b>The autopsy</b> — <code>autopsy.py</code> against the audit trail: why swing bled.</li>
+    <li><b>Two swing backtest windows</b> — old swing vs swing_v2 (the trend-pullback engine) vs the filtered-breakout variant vs hold-SPY. This decides whether pullback goes live, which is the question a second pullback engine would only duplicate.</li>
+    <li><b>The xsect replay</b> — prices the sector cap and the five universe additions on history.</li>
+    <li><b>Partial-sell support in brokers.py</b> — unblocks layered exits for meanrev and intraday, and is the prerequisite for any future short-side work.</li>
+    <li><b>Regime allocation → live</b> — after its shadow log shows the classifier tracking real market states.</li>
+  </ul>
+  <p class="soft" style="border-top:1px solid var(--line);padding-top:14px;margin-top:26px">
+  One sentence: <b>the CIO decides how hard to push, five strategies decide what to buy, four
+  brakes decide whether risk allows it, the broker layer executes with the stops resting
+  outside the process, and /data remembers all of it — with every switch stated out loud at
+  boot.</b></p>
+</main>
+</body>
+</html>
