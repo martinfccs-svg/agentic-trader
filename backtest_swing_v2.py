@@ -22,6 +22,35 @@ price or the day's open if it gapped through (gap risk included).
 Same honesty rules as before: this simulates the past. Beating SPY after
 costs on multiple windows is the bar for deployment consideration -- not a
 promise about the future, and expect some or all configs to fail.
+
+================================ VALIDATION STATUS ================================
+NO REAL-DATA RUN HAS BEEN COMPLETED AS OF 2026-07-25.
+
+Every result circulated so far came from --synthetic: random-walk prices over
+10 placeholder symbols. Those runs prove the CODE EXECUTES. They contain zero
+information about whether any variant has an edge. The tell in the last set:
+it reported SPY at -22.1% over 365 days, while real SPY was up strongly.
+
+RULE FOR THIS FILE: synthetic output is never recorded as validation, never
+pasted into a docstring, and never cited in a deployment decision. If you find
+performance numbers written into this file's documentation, they are wrong --
+delete them.
+
+To produce a real verdict (from the repo directory, ALPACA_API_KEY /
+ALPACA_SECRET_KEY set):
+
+    python backtest_swing_v2.py --days 730
+    python backtest_swing_v2.py --days 365
+
+Confirm before reading any number:
+  * the first line says "68 symbols from config.UNIVERSE"
+  * NO "!!!! SYNTHETIC DATA" banner appears
+
+The bar for promoting swing_v2 out of shadow: beat hold-SPY on Sharpe with a
+shallower max drawdown, on BOTH windows, after costs. Expect filt_brkout to
+take very few trades -- its statistics will rest on a sample too small to
+trust regardless of how they look.
+===================================================================================
 """
 
 from __future__ import annotations
