@@ -39,6 +39,23 @@ INTRADAY_ENTRIES = os.getenv("INTRADAY_ENTRIES", "true").lower() == "true"
 # ignored it. Fail-open: if the card can't be computed, v6 decides.
 INTRADAY_V2_GATE = os.getenv("INTRADAY_V2_GATE", "false").lower() == "true"
 
+# ---------------------------------------------------------------------------
+# REJECTION VISIBILITY (2026-07-24). Rejections went only to TradeLogger,
+# which does not reach stdout — so on the first live day the funnel showed
+# 4,3,2,1,2,1,1,1,3,2 signals, ONE trade, and no way to tell whether the v2
+# gate refused the rest or max_positions did. That is the difference between
+# "the filter works" and "the filter is too strict", and it was invisible.
+# Throttled per ticker: a repeating signal rejected for the same reason logs
+# ONCE, not every ~6-second cycle.
+# ---------------------------------------------------------------------------
+_last_reject: dict[str, str] = {}
+
+
+def _log_reject(ticker: str, reason: str) -> None:
+    if _last_reject.get(ticker) != reason:
+        _last_reject[ticker] = reason
+        log.warning("INTRADAY REJECT %s: %s", ticker, reason)
+
 
 class IntradayRiskEngine:
     def __init__(self, feed, broker, kill, logger):
@@ -62,9 +79,13 @@ class IntradayRiskEngine:
             # us out. Applies in shadow AND live.
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
                              "cooldown after loss")
+            _log_reject(signal.ticker, "cooldown after loss (time-based)")
             return
         if self._open() >= INTRADAY.max_positions or signal.ticker in self._broker.positions:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK)
+            _log_reject(signal.ticker,
+                        f"max_positions ({self._open()}/"
+                        f"{INTRADAY.max_positions}) or already held")
             return
         q = self._feed.get_quote(signal.ticker)
         if q is None:
@@ -77,6 +98,8 @@ class IntradayRiskEngine:
         daily_dv = avg_dollar_volume(daily) if daily else None
         if q.price < MIN_PRICE or (daily_dv or 0) < MIN_DOLLAR_VOL:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_LIQUIDITY)
+            _log_reject(signal.ticker,
+                        f"liquidity (px={q.price:.2f} dv={daily_dv or 0:,.0f})")
             return
         # INTRADAY-scale ATR, computed explicitly from 1-min bars. q.atr is
         # now DAILY-scale by contract (see feed_layer.get_quote): using it
@@ -93,6 +116,7 @@ class IntradayRiskEngine:
         if ids.in_cooldown(signal.ticker, closes_1m=intra.close):
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
                              "cooldown after loss (EMA20 not reclaimed)")
+            _log_reject(signal.ticker, "cooldown (EMA20 not reclaimed)")
             return
         stop = q.price - INTRADAY.atr_stop_multiple * intra_atr
         shares = position_size(self._broker.equity, q.price, stop, getattr(self._broker, "cash", 1e12))
@@ -139,6 +163,11 @@ class IntradayRiskEngine:
                              Action.REJECTED_BY_CONFIRMATION,
                              f"v2 gate: score={card.score:.2f} "
                              f"gates_ok={card.gates_ok}")
+            _log_reject(signal.ticker,
+                        "v2 gate score=%.2f (min %.2f) gates[win=%s mkt=%s "
+                        "rv=%s vol=%s]" % (card.score, ids.SCORE_MIN,
+                                           card.gate_window, card.gate_market,
+                                           card.gate_rv, card.gate_volband))
             return
 
         if INTRADAY_ENTRIES and INTRADAY_V2_GATE and card is not None \
@@ -191,6 +220,7 @@ class IntradayRiskEngine:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
                              "broker refused order (duplicate/existing/qty=0)")
             return
+        _last_reject.pop(signal.ticker, None)   # state changed; re-arm logging
         self._flattened_latch = False   # new position -> flatten may act again
         self._log.record(signal, System.INTRADAY, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
