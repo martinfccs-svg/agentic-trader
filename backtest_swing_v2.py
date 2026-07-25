@@ -333,17 +333,39 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--cost-bps", type=float, default=5.0)
-    ap.add_argument("--symbols-file")
+    ap.add_argument("--symbols-file", default=None,
+                    help="optional; omit to read UNIVERSE from config.py")
     ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
 
-    syms = DEFAULT_SYMBOLS
+    # Universe resolution, most-authoritative first. DEFAULT_SYMBOLS used to
+    # be the silent fallback, which is how a run intended for the real
+    # 68-name universe quietly tested 10 hardcoded names instead.
     if a.symbols_file:
         syms = [l.strip().upper() for l in open(a.symbols_file)
                 if l.strip() and not l.startswith("#")]
-    print(f"Universe: {len(syms)} symbols | window ~{a.days}d | "
+        _src = a.symbols_file
+    else:
+        try:
+            from config import UNIVERSE
+            syms = [t.strip().upper() for t in UNIVERSE]
+            _src = "config.UNIVERSE"
+        except Exception as _e:  # noqa: BLE001
+            syms = DEFAULT_SYMBOLS
+            _src = (f"DEFAULT_SYMBOLS fallback — could NOT import UNIVERSE "
+                    f"from config.py ({_e}); run from the repo directory for "
+                    f"the real universe")
+    print(f"Universe: {len(syms)} symbols from {_src} | window ~{a.days}d | "
           f"cost {a.cost_bps}bps/side")
     if a.synthetic:
+        print("\n" + "!" * 78)
+        print("!!  SYNTHETIC DATA — RANDOM WALKS, NOT MARKETS.")
+        print("!!  This validates that the CODE RUNS. It says NOTHING about")
+        print("!!  whether any strategy has an edge. Sharpe, win%, and returns")
+        print("!!  below are noise: do not compare configs, do not promote a")
+        print("!!  strategy on these numbers. For a real verdict, drop")
+        print("!!  --synthetic and set ALPACA_API_KEY / ALPACA_SECRET_KEY.")
+        print("!" * 78 + "\n")
         print("*** SYNTHETIC data -- results meaningless; pipeline test ***")
         bars = synthetic(syms, min(a.days, 500))
     else:
