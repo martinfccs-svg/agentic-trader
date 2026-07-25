@@ -9,7 +9,6 @@ Runs FOUR configurations over daily bars and compares them to buying SPY:
 
 USAGE
   python backtest_swing_v2.py --symbols-file universe.txt --days 730
-  python backtest_swing_v2.py --synthetic          # pipeline check, no keys
 
   universe.txt = one ticker per line (your 63 symbols). Without the flag it
   uses a small default basket just so the command runs.
@@ -26,15 +25,17 @@ promise about the future, and expect some or all configs to fail.
 ================================ VALIDATION STATUS ================================
 NO REAL-DATA RUN HAS BEEN COMPLETED AS OF 2026-07-25.
 
-Every result circulated so far came from --synthetic: random-walk prices over
-10 placeholder symbols. Those runs prove the CODE EXECUTES. They contain zero
-information about whether any variant has an edge. The tell in the last set:
-it reported SPY at -22.1% over 365 days, while real SPY was up strongly.
+Earlier results circulated for this harness came from a synthetic mode that
+generated random-walk prices over 10 placeholder symbols. Those runs proved
+the CODE EXECUTED; they carried zero information about edge. The tell: one
+reported SPY at -22.1% over 365 days while real SPY was up strongly.
+THAT MODE HAS BEEN REMOVED. This harness now fetches real bars or exits --
+there is no code path here that can manufacture a number.
 
-RULE FOR THIS FILE: synthetic output is never recorded as validation, never
-pasted into a docstring, and never cited in a deployment decision. If you find
-performance numbers written into this file's documentation, they are wrong --
-delete them.
+RULE FOR THIS FILE: performance numbers do not belong in this docstring. Put
+real results in a dated document (docs/BACKTEST_RESULTS_<date>.md) where the
+window, universe and date are stated. If you find performance figures written
+into this file's documentation, they are wrong -- delete them.
 
 To produce a real verdict (from the repo directory, ALPACA_API_KEY /
 ALPACA_SECRET_KEY set):
@@ -58,7 +59,6 @@ from __future__ import annotations
 import argparse
 import math
 import os
-import random
 import statistics
 import sys
 import time
@@ -194,10 +194,9 @@ def fetch_bars(symbols, days):
             "      export ALPACA_API_KEY=...\n"
             "      export ALPACA_SECRET_KEY=...\n"
             "  (APCA_API_KEY_ID / APCA_API_SECRET_KEY also work.)\n\n"
-            "  --synthetic exists ONLY to check that this code runs. It\n"
-            "  generates random walks, NOT markets, and CANNOT validate a\n"
-            "  strategy. Do not reach for it here: a run without keys is a\n"
-            "  credentials problem, not a reason to test against noise.\n")
+            "  There is NO synthetic or offline fallback in this harness --\n"
+            "  by design. A run without credentials produces no number at\n"
+            "  all, rather than a plausible-looking one. Fix the keys.\n")
     h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     out = {}
@@ -218,28 +217,6 @@ def fetch_bars(symbols, days):
             if not page:
                 break
             time.sleep(0.25)
-    return out
-
-
-def synthetic(symbols, days, seed=11):
-    rng = random.Random(seed)
-    start = datetime(2024, 1, 2)
-    out = {}
-    for sym in symbols + ["SPY"]:
-        drift, vol, px = rng.uniform(-0.0003, 0.001), rng.uniform(0.012, 0.03), 100.0
-        bars, d = [], start
-        while len(bars) < days:
-            if d.weekday() < 5:
-                o = px * math.exp(vol * rng.gauss(0, 0.3))
-                c = o * math.exp(drift + vol * rng.gauss(0, 1))
-                hi = max(o, c) * (1 + abs(rng.gauss(0, vol / 2)))
-                lo = min(o, c) * (1 - abs(rng.gauss(0, vol / 2)))
-                v = max(1, rng.lognormvariate(13, 0.5))
-                bars.append({"t": d.strftime("%Y-%m-%dT00:00:00Z"), "o": o,
-                             "h": hi, "l": lo, "c": c, "v": v})
-                px = c
-            d += timedelta(days=1)
-        out[sym] = bars
     return out
 
 
@@ -372,7 +349,6 @@ def main():
     ap.add_argument("--cost-bps", type=float, default=5.0)
     ap.add_argument("--symbols-file", default=None,
                     help="optional; omit to read UNIVERSE from config.py")
-    ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
 
     # Universe resolution, most-authoritative first. DEFAULT_SYMBOLS used to
@@ -394,19 +370,7 @@ def main():
                     f"the real universe")
     print(f"Universe: {len(syms)} symbols from {_src} | window ~{a.days}d | "
           f"cost {a.cost_bps}bps/side")
-    if a.synthetic:
-        print("\n" + "!" * 78)
-        print("!!  SYNTHETIC DATA — RANDOM WALKS, NOT MARKETS.")
-        print("!!  This validates that the CODE RUNS. It says NOTHING about")
-        print("!!  whether any strategy has an edge. Sharpe, win%, and returns")
-        print("!!  below are noise: do not compare configs, do not promote a")
-        print("!!  strategy on these numbers. For a real verdict, drop")
-        print("!!  --synthetic and set ALPACA_API_KEY / ALPACA_SECRET_KEY.")
-        print("!" * 78 + "\n")
-        print("*** SYNTHETIC data -- results meaningless; pipeline test ***")
-        bars = synthetic(syms, min(a.days, 500))
-    else:
-        bars = fetch_bars(syms + ["SPY"], a.days)
+    bars = fetch_bars(syms, a.days)
     dates = sorted({b["t"][:10] for s in bars.values() for b in s})
     years = len(dates) / 252
     cost = a.cost_bps / 10000
@@ -439,12 +403,6 @@ def main():
                     else f"{v:>10.1f} " if c == "win%"
                     else f"{v:>10.2f} ")
         print(row)
-    if a.synthetic:
-        print("\n" + "!" * 78)
-        print("!!  THE TABLE ABOVE IS SYNTHETIC — random walks, not markets.")
-        print("!!  These numbers cannot rank strategies or justify going live.")
-        print("!!  Do not copy them into a report, a docstring, or a commit.")
-        print("!" * 78)
     print("\nBar for deployment consideration: beat hold_SPY on Sharpe with "
           "shallower maxdd, after costs, on BOTH --days 365 and --days 730. "
           "avg_win should exceed |avg_loss| meaningfully for a pullback "
