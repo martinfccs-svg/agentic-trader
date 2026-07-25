@@ -34,6 +34,7 @@ from swing_engine import SwingRiskEngine
 from swing_v2 import scan_swing_v2
 import regime
 import portfolio_risk
+import regime_allocation
 from meanrev_engine import MeanReversionEngine
 from xsection import CrossSectionalMomentumEngine
 from trade_logger import TradeLogger
@@ -111,12 +112,13 @@ def build():
         from xsection import XSECT_SECTOR_CAP as _cap
         import meanrev_scoring as _mrs
         import regime as _rg
+        import regime_allocation as _ra
         log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
                     "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
                     "REGIME_FILTER=%s MEANREV_SCORING=%s "
-                    "MEANREV_SCORE_MIN=%d",
+                    "MEANREV_SCORE_MIN=%d REGIME_ALLOC=%s",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
-                    _mrs.SCORE_MIN)
+                    _mrs.SCORE_MIN, _ra.MODE)
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
@@ -194,6 +196,16 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
         intraday.flatten_all("near close")
+
+    # Regime allocation (2026-07-24): the CIO layer. Classified once per
+    # cycle (TTL-cached inside, so this is cheap) purely so the label and
+    # multipliers are always visible in the log. In shadow mode it applies
+    # NOTHING — engines call regime_allocation.multiplier() themselves and
+    # get 1.0 back until REGIME_ALLOC=live.
+    try:
+        regime_allocation.current(feed, UNIVERSE)
+    except Exception as e:  # noqa: BLE001 — an overlay must never break a cycle
+        log.error("regime allocation read failed (non-fatal): %s", e)
 
     # Portfolio heat (2026-07-24 fix): read ONCE PER CYCLE from the main
     # loop, not from inside an engine's signal handler. The first wiring
