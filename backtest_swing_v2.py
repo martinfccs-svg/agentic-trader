@@ -188,8 +188,16 @@ def fetch_bars(symbols, days):
     sec = (os.environ.get("ALPACA_SECRET_KEY")
            or os.environ.get("APCA_API_SECRET_KEY"))
     if not key or not sec:
-        sys.exit("Set ALPACA_API_KEY / ALPACA_SECRET_KEY (or APCA_* names), "
-                 "or use --synthetic.")
+        sys.exit(
+            "\nNO API CREDENTIALS FOUND — cannot fetch real market data.\n\n"
+            "  Set your PAPER keys (the same ones Railway uses):\n"
+            "      export ALPACA_API_KEY=...\n"
+            "      export ALPACA_SECRET_KEY=...\n"
+            "  (APCA_API_KEY_ID / APCA_API_SECRET_KEY also work.)\n\n"
+            "  --synthetic exists ONLY to check that this code runs. It\n"
+            "  generates random walks, NOT markets, and CANNOT validate a\n"
+            "  strategy. Do not reach for it here: a run without keys is a\n"
+            "  credentials problem, not a reason to test against noise.\n")
     h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     out = {}
@@ -431,6 +439,12 @@ def main():
                     else f"{v:>10.1f} " if c == "win%"
                     else f"{v:>10.2f} ")
         print(row)
+    if a.synthetic:
+        print("\n" + "!" * 78)
+        print("!!  THE TABLE ABOVE IS SYNTHETIC — random walks, not markets.")
+        print("!!  These numbers cannot rank strategies or justify going live.")
+        print("!!  Do not copy them into a report, a docstring, or a commit.")
+        print("!" * 78)
     print("\nBar for deployment consideration: beat hold_SPY on Sharpe with "
           "shallower maxdd, after costs, on BOTH --days 365 and --days 730. "
           "avg_win should exceed |avg_loss| meaningfully for a pullback "
