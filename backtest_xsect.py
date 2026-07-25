@@ -28,6 +28,27 @@ Honesty: history, not prophecy. If cap=1 looks worse over a window that was
 one long AI rally, that is the cap doing its job in the one regime where
 diversification is pure cost; judge it on drawdown and on multi-window
 consistency, not one number. Not financial advice.
+
+================================ VALIDATION STATUS ================================
+NO REAL-DATA RUN HAS BEEN COMPLETED AS OF 2026-07-25.
+
+This harness has NO synthetic mode -- it fetches live bars or exits. Any claim
+that the sector cap or regime filter has been "validated" by this script is
+unsupported unless it is accompanied by an actual results table containing
+monoculture%, avg_sectors, Sharpe and maxdd for each variant.
+
+Separately, and worth keeping straight: the sector cap IS confirmed working in
+PRODUCTION -- the 2026-07-24 rotation logged
+    sector-capped top3: MU[tech], CAT[industrials], UNP[transports]
+    capped out: ARM(tech)
+That is live evidence the mechanism fires. It is NOT evidence the cap improves
+returns. This replay is what prices that question.
+
+To run (from the repo directory, ALPACA_API_KEY / ALPACA_SECRET_KEY set):
+
+    python backtest_xsect.py --days 730 --with-additions --regime
+    python backtest_xsect.py --days 365 --with-additions --regime
+===================================================================================
 """
 
 from __future__ import annotations
