@@ -33,6 +33,7 @@ from scanner import PriceActionScanner
 from swing_engine import SwingRiskEngine
 from swing_v2 import scan_swing_v2
 import regime
+import portfolio_risk
 from meanrev_engine import MeanReversionEngine
 from xsection import CrossSectionalMomentumEngine
 from trade_logger import TradeLogger
@@ -193,6 +194,18 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
         intraday.flatten_all("near close")
+
+    # Portfolio heat (2026-07-24 fix): read ONCE PER CYCLE from the main
+    # loop, not from inside an engine's signal handler. The first wiring
+    # sat in meanrev.handle_signal — which never fires when nothing is
+    # oversold — so the instrument was installed and never took a reading.
+    # Measurement must not depend on a signal arriving. Throttled inside
+    # portfolio_risk (re-logs only on a >=0.5pp move); gating stays off
+    # until PORTFOLIO_HEAT_MAX > 0.
+    try:
+        portfolio_risk.check(broker)
+    except Exception as e:  # noqa: BLE001 — an instrument must never break a cycle
+        log.error("portfolio heat read failed (non-fatal): %s", e)
 
     # Honest P&L: realized and unrealized logged separately, per system.
     for system in System:
