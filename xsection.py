@@ -44,6 +44,7 @@ from risk import position_size
 from safety import market_is_open
 from scan_health import DailyRebalanceGate
 import regime
+import regime_allocation
 from sector_map import sector_of
 
 log = logging.getLogger("xsectmom")
@@ -245,6 +246,15 @@ class CrossSectionalMomentumEngine:
             stop = q.price - XSECT.atr_stop_multiple * q.atr
             shares = position_size(self._broker.equity, q.price, stop,
                                    getattr(self._broker, "cash", 1e12))
+            # Regime allocation (2026-07-24): scale SHARES only; 1.0 unless
+            # REGIME_ALLOC=live. Wired here because the STRONG_BULL table
+            # leans hardest on xsectmom — leaving it unwired would have made
+            # that number decorative.
+            shares, _alloc = regime_allocation.apply_to_shares(
+                shares, self._feed, "xsectmom", self._broker.equity, q.price)
+            if _alloc != 1.0:
+                log.info("xsect regime sizing %s: x%.2f -> shares=%.2f",
+                         ticker, _alloc, shares)
             if shares <= 0:
                 log.warning("xsect rebalance: skip %s — size=0", ticker)
                 continue
