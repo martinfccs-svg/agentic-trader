@@ -12,6 +12,7 @@ import os
 
 import audit
 import intraday_scoring as ids
+import regime_allocation
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import atr, avg_dollar_volume
 from models import Action, Signal, System
@@ -120,6 +121,12 @@ class IntradayRiskEngine:
             return
         stop = q.price - INTRADAY.atr_stop_multiple * intra_atr
         shares = position_size(self._broker.equity, q.price, stop, getattr(self._broker, "cash", 1e12))
+        # Regime allocation (2026-07-24): shares only; 1.0 unless live.
+        shares, _alloc = regime_allocation.apply_to_shares(
+            shares, self._feed, "intraday", self._broker.equity, q.price)
+        if _alloc != 1.0:
+            log.info("intraday regime sizing %s: x%.2f -> shares=%.2f",
+                     signal.ticker, _alloc, shares)
         if shares <= 0:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "size=0")
             return
