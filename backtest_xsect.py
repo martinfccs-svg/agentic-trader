@@ -80,7 +80,14 @@ def fetch_bars(symbols, days):
     sec = (os.environ.get("ALPACA_SECRET_KEY")
            or os.environ.get("APCA_API_SECRET_KEY"))
     if not key or not sec:
-        sys.exit("Set ALPACA_API_KEY / ALPACA_SECRET_KEY (or APCA_* names).")
+        sys.exit(
+            "\nNO API CREDENTIALS FOUND — cannot fetch real market data.\n\n"
+            "  Set your PAPER keys (the same ones Railway uses):\n"
+            "      export ALPACA_API_KEY=...\n"
+            "      export ALPACA_SECRET_KEY=...\n"
+            "  (APCA_API_KEY_ID / APCA_API_SECRET_KEY also work.)\n\n"
+            "  This harness has NO synthetic mode by design — there is no\n"
+            "  fallback that produces a number here. Fix the credentials.\n")
     h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     out = {}
