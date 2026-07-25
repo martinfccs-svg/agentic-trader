@@ -16,6 +16,7 @@ from config import MEANREV, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import rsi
 import meanrev_scoring as mrs
 import portfolio_risk
+import regime_allocation
 from models import Action, Signal, System
 from risk import position_size
 from safety import market_is_open
@@ -94,6 +95,12 @@ class MeanReversionEngine:
         stop = q.price - MEANREV.atr_stop_multiple * q.atr
         shares = position_size(self._broker.equity, q.price, stop,
                                getattr(self._broker, "cash", 1e12))
+        # Regime allocation (2026-07-24): shares only; 1.0 unless live.
+        shares, _alloc = regime_allocation.apply_to_shares(
+            shares, self._feed, "meanrev", self._broker.equity, q.price)
+        if _alloc != 1.0:
+            log.info("meanrev regime sizing %s: x%.2f -> shares=%.2f",
+                     signal.ticker, _alloc, shares)
         # Conviction sizing (2026-07-24): only in live scoring mode, where a
         # scorecard actually gated the entry. Scales the SHARE COUNT, never
         # the equity passed to position_size — scaling equity would also
