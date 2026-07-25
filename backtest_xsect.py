@@ -182,7 +182,8 @@ def replay(px, dates, syms, top_n, lookback, skip, cap, cost, spy_close,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--symbols-file", required=True)
+    ap.add_argument("--symbols-file", default=None,
+                    help="optional; omit to read UNIVERSE from config.py")
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--top-n", type=int, default=3)
     ap.add_argument("--lookback", type=int, default=126)
@@ -194,8 +195,19 @@ def main():
                     help="also run each variant under the SPY/200SMA gate")
     a = ap.parse_args()
 
-    base = [l.strip().upper() for l in open(a.symbols_file)
-            if l.strip() and not l.startswith("#")]
+    if a.symbols_file:
+        base = [l.strip().upper() for l in open(a.symbols_file)
+                 if l.strip() and not l.startswith("#")]
+        _src = a.symbols_file
+    else:
+        try:
+            from config import UNIVERSE
+            base = [t.strip().upper() for t in UNIVERSE]
+            _src = "config.UNIVERSE"
+        except Exception as _e:  # noqa: BLE001
+            sys.exit("No --symbols-file and could not import UNIVERSE from "
+                     f"config.py ({_e}). Run from the repo directory.")
+    print(f"universe: {len(base)} symbols from {_src}")
     fetch_syms = sorted(set(base) | set(UNIVERSE_ADDITIONS) | {"SPY"})
     print(f"fetching {len(fetch_syms)} symbols x {a.days}d ...")
     raw = fetch_bars(fetch_syms, a.days)
