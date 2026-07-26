@@ -381,7 +381,17 @@ def main():
         print("\nWARNING: SPY bars unavailable — the hold_SPY benchmark row "
               "will be absent and the promotion bar CANNOT be evaluated.\n")
     dates = sorted({b["t"][:10] for s in bars.values() for b in s})
-    years = len(dates) / 252
+    # WARMUP-ALIGNED WINDOW (2026-07-25 fix). The replay loops start at
+    # dates[WARM], so strategies trade fewer days than the raw fetch. Timing
+    # the benchmark over the FULL fetch while strategies traded a subset made
+    # the two non-comparable and inflated every annualised figure. Both now
+    # use the same window.
+    WARM = 60
+    replay_dates = dates[WARM:]
+    years = max(len(replay_dates) / 252, 1e-9)
+    print(f"replay window: {len(replay_dates)} trading days "
+          f"({years:.2f} yr) after a {WARM}-day warmup — benchmark timed over "
+          f"the SAME window")
     cost = a.cost_bps / 10000
 
     rows = {}
@@ -395,9 +405,12 @@ def main():
     rows["filt_brkout"] = stats(curve, trades, years)
 
     if "SPY" in bars:
-        spy = [b["c"] for b in bars["SPY"]]
-        curve = [100_000 * c / spy[0] for c in spy]
-        rows["hold_SPY"] = stats(curve, [], years)
+        # benchmark over replay_dates only, so totals are apples-to-apples
+        by_date = {b["t"][:10]: float(b["c"]) for b in bars["SPY"]}
+        spy = [by_date[d] for d in replay_dates if d in by_date]
+        if len(spy) > 2:
+            curve = [100_000 * c / spy[0] for c in spy]
+            rows["hold_SPY"] = stats(curve, [], years)
 
     cols = ["total", "cagr", "sharpe", "maxdd", "trades", "win%",
             "avg_win", "avg_loss"]
