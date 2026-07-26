@@ -162,7 +162,7 @@ def load_alpaca_roundtrips() -> list[dict]:
                     "ticker": t, "system": lot["system"], "qty": take,
                     "entry": lot["price"], "exit": f["price"],
                     "realized": realized,
-                    "via": system_of(f["coid"]) and "bot_sell" or "leg_or_manual",
+                    "via": _exit_path(f["coid"]),
                     "ts": f["ts"],
                 })
                 lot["qty"] -= take
@@ -177,6 +177,29 @@ def load_alpaca_roundtrips() -> list[dict]:
 
 
 # ---------------------------------------------------------------- analysis
+
+def _exit_path(coid: str) -> str:
+    """Classify HOW a position closed, from the closing fill's client order id.
+
+    Critical to read correctly (2026-07-26): the bot stamps bot-{system} on
+    the ENTRY order. Bracket child legs -- the broker-side stop and take
+    profit -- are created by Alpaca with their own ids, so they never carry
+    that tag. An earlier version lumped them in with manual closes under
+    "leg_or_manual", and that label was then misread as "no automatic exits
+    are firing / execution is broken". The opposite is true: a bracket leg
+    filling IS the designed exit path, and it works while the process is
+    offline.
+
+      bot_sell     engine issued a market sell (signal/ladder/time exit)
+      manual_tool  protect.py --close or --confirm (operator action)
+      bracket_leg  broker-side stop or take-profit filled  <-- BY DESIGN
+    """
+    if system_of(coid):
+        return "bot_sell"
+    if coid and str(coid).startswith(("manual-close", "manual-protect")):
+        return "manual_tool"
+    return "bracket_leg"
+
 def analyze(trades: list[dict], label: str):
     if not trades:
         print(f"\n== {label}: no closed trades ==")
