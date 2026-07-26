@@ -269,8 +269,15 @@ def main():
                 rows[label] = replay(px, dates, syms, a.top_n, a.lookback,
                                      a.skip, cap, a.cost_bps / 10000, spy,
                                      reg)
-    # SPY benchmark
-    sd = [spy[d] for d in dates if d in spy]
+    # SPY benchmark — WARMUP-ALIGNED (2026-07-25 fix). replay() starts at
+    # dates[lookback+skip+1]; timing the benchmark over the full fetch while
+    # the strategies traded a much shorter window made "beats hold_SPY"
+    # meaningless (250 benchmark days vs ~117 strategy days on a 365d fetch).
+    warm = a.lookback + a.skip + 1
+    replay_dates = dates[warm:]
+    print(f"replay window: {len(replay_dates)} trading days after a "
+          f"{warm}-day warmup — benchmark timed over the SAME window\n")
+    sd = [spy[d] for d in replay_dates if d in spy]
     if len(sd) > 2:
         eq = [v / sd[0] for v in sd]
         rets = [eq[i + 1] / eq[i] - 1 for i in range(len(eq) - 1)]
