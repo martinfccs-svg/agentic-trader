@@ -232,6 +232,42 @@ def analyze(trades: list[dict], label: str):
             print(f"    {t['ts'][:10]} {t['ticker']:<6} x{t['qty']:<6.0f} "
                   f"{t['entry']:.2f}->{t['exit']:.2f}  {t['realized']:+,.2f} "
                   f"({t['via']})")
+    # ---- REPEAT ENTRIES (2026-07-26) -----------------------------------
+    # The diagnostic that separates "bad entries" from "no re-entry
+    # protection". A strategy stopped out of a name and then re-entering it
+    # days later, repeatedly, does not have a signal-quality problem -- it
+    # has a missing cooldown. Intraday got one for exactly this pattern;
+    # swing has none, so it can be stopped out and re-enter indefinitely.
+    per_ticker = defaultdict(list)
+    for t in trades:
+        per_ticker[t["ticker"]].append(t)
+    repeats = {k: v for k, v in per_ticker.items() if len(v) > 1}
+    if repeats:
+        print(f"  tickers traded more than once ({len(repeats)} of "
+              f"{len(per_ticker)}):")
+        for tk, ts in sorted(repeats.items(),
+                             key=lambda kv: sum(x["realized"] for x in kv[1])):
+            net = sum(x["realized"] for x in ts)
+            losers = sum(1 for x in ts if x["realized"] < 0)
+            print(f"    {tk:<6} {len(ts)} trades  {losers} losing  "
+                  f"net {net:+,.2f}")
+        worst_tk, worst_ts = min(repeats.items(),
+                                 key=lambda kv: sum(x["realized"]
+                                                    for x in kv[1]))
+        wnet = sum(x["realized"] for x in worst_ts)
+        wlose = sum(1 for x in worst_ts if x["realized"] < 0)
+        if gross_loss and wnet < 0 and abs(wnet) / gross_loss > 0.5 \
+                and wlose >= 3:
+            print(f"  -> {worst_tk} alone is {abs(wnet)/gross_loss*100:.0f}% "
+                  f"of all losses across {wlose} losing trades. That is a "
+                  f"RE-ENTRY pattern, not {len(trades)} independent bad "
+                  f"signals: the strategy kept going back to a name that "
+                  f"kept stopping it out. A per-ticker loss cooldown is the "
+                  f"targeted fix, NOT looser or tighter entry filters.")
+    else:
+        print("  no ticker traded more than once — losses are independent, "
+              "so re-entry protection is not the issue here.")
+
     via = defaultdict(int)
     for t in trades:
         via[t["via"]] += 1
