@@ -14,6 +14,7 @@ from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
 from models import Action, Signal, System
 from risk import position_size
 import regime_allocation
+import loss_cooldown
 from safety import market_is_open
 
 log = logging.getLogger("swing")
@@ -65,6 +66,16 @@ class SwingRiskEngine:
     def handle_signal(self, signal: Signal):
         if not self._kill.may_open(System.SWING):
             self._log.record(signal, System.SWING, Action.REJECTED_BY_KILL_SWITCH)
+            return
+        # Per-ticker loss cooldown (2026-07-26). From the autopsy: swing's
+        # closed trades were 6 on META, 5 of them losses — a re-entry pattern,
+        # not six independent bad signals. Blocks re-entry into a name that
+        # recently stopped us out. SWING_LOSS_COOLDOWN_DAYS=0 disables.
+        _cool, _why = loss_cooldown.in_cooldown("swing", signal.ticker)
+        if _cool:
+            log.warning("SWING COOLDOWN %s: %s", signal.ticker, _why)
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK,
+                             f"loss cooldown: {_why}")
             return
         if self._open() >= SWING.max_positions or signal.ticker in self._broker.positions:
             self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK)
@@ -128,6 +139,12 @@ class SwingRiskEngine:
             for _t, realized in \
                     self._broker.reconcile_filled_legs(System.SWING).items():
                 self._log.record_close(System.SWING, realized)
+                # Bracket legs are how most positions actually close (autopsy:
+                # exit paths were overwhelmingly bracket_leg). Arming the
+                # cooldown only from the local-stop path would leave it
+                # effectively dead.
+                if realized is not None and realized < 0:
+                    loss_cooldown.note_loss("swing", _t)
         for ticker in list(self._broker.positions):
             pos = self._broker.positions.get(ticker)
             if pos is None or pos.system is not System.SWING:
@@ -152,6 +169,8 @@ class SwingRiskEngine:
                     shares = pos.shares
                     realized = self._broker.sell(ticker, exit_price)
                     self._log.record_close(System.SWING, realized)
+                    if realized is not None and realized < 0:
+                        loss_cooldown.note_loss("swing", ticker)
                     if exit_price is not None and realized is not None:
                         self._notifier.notify_exit(
                             ticker=ticker, shares=shares,
