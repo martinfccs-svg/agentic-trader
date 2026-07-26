@@ -242,7 +242,19 @@ def main():
     px = {s2: closes_by_date(b) for s2, b in raw.items()}
     dates = sorted(set().union(*(set(c) for c in px.values())))
     spy = px.get("SPY", {})
-    print(f"{len(dates)} trading days\n")
+    expected = int(a.days * 252 / 365)
+    print(f"{len(dates)} trading days aligned (expected ~{expected} for "
+          f"--days {a.days})")
+    if len(dates) < 0.85 * expected:
+        counts = sorted(((len(closes[s]), s) for s in closes), key=lambda t: t[0])
+        short = ", ".join(f"{s}:{n}" for n, s in counts[:6])
+        print(f"\n*** WARNING: the aligned window is only {len(dates)}/"
+              f"{expected} days. Dates are intersected across ALL symbols, so "
+              f"one short history truncates everything — and CAGR is then "
+              f"annualised from too little data (a 50% total over half a year "
+              f"reads as 140% CAGR). Fewest bars: {short}. Treat CAGR as "
+              f"unreliable here; total, Sharpe and maxdd remain valid.\n")
+    print()
 
     universes = {"base": base}
     if a.with_additions:
