@@ -370,7 +370,16 @@ def main():
                     f"the real universe")
     print(f"Universe: {len(syms)} symbols from {_src} | window ~{a.days}d | "
           f"cost {a.cost_bps}bps/side")
-    bars = fetch_bars(syms, a.days)
+    # SPY must always be fetched even though it is not in the trading
+    # universe: it IS the benchmark, and the promotion bar is stated against
+    # it. When the universe switched to config.UNIVERSE (which has no SPY),
+    # the hold_SPY row silently disappeared from the results table — a
+    # missing benchmark is worse than a wrong one, because nothing looks wrong.
+    fetch_syms = syms + (["SPY"] if "SPY" not in syms else [])
+    bars = fetch_bars(fetch_syms, a.days)
+    if "SPY" not in bars:
+        print("\nWARNING: SPY bars unavailable — the hold_SPY benchmark row "
+              "will be absent and the promotion bar CANNOT be evaluated.\n")
     dates = sorted({b["t"][:10] for s in bars.values() for b in s})
     years = len(dates) / 252
     cost = a.cost_bps / 10000
