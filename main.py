@@ -113,12 +113,14 @@ def build():
         import meanrev_scoring as _mrs
         import regime as _rg
         import regime_allocation as _ra
+        import loss_cooldown as _lc
         log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
                     "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
                     "REGIME_FILTER=%s MEANREV_SCORING=%s "
-                    "MEANREV_SCORE_MIN=%d REGIME_ALLOC=%s",
+                    "MEANREV_SCORE_MIN=%d REGIME_ALLOC=%s "
+                    "SWING_LOSS_COOLDOWN_DAYS=%d",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
-                    _mrs.SCORE_MIN, _ra.MODE)
+                    _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0))
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
@@ -371,5 +373,4 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true")
     run(loop=ap.parse_args().loop)
-
 
