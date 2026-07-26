@@ -237,6 +237,17 @@ def run(loop: bool, cycles: int = 40):
     log.info("agentic-trader v6 | mode=%s | broker live-armed=%s",
              TRADING_MODE, live_money_armed())
 
+    # Volume persistence canary (2026-07-26). Runs FIRST, before reconcile,
+    # because reconcile's behaviour depends on the registry existing: an empty
+    # registry silently degrades entry_time to boot time and reports "no known
+    # stop". A 898-byte audit.jsonl alongside 63 closed trades at the broker
+    # is what prompted this check.
+    try:
+        import volume_check
+        volume_check.check()
+    except Exception as e:  # noqa: BLE001 — a diagnostic must never block boot
+        log.error("volume_check failed (non-fatal): %s", e)
+
     sim = isinstance(feed, SimulatedFeed)
     audit.boot(mode=TRADING_MODE, live_armed=live_money_armed(),
                equity=broker.equity, sim=sim,
@@ -373,4 +384,3 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true")
     run(loop=ap.parse_args().loop)
-
