@@ -236,6 +236,51 @@ class CrossSectionalMomentumEngine:
 
         # Buy new entrants (kill switch already verified before the exits —
         # rotation atomicity: we only get here if entries are permitted).
+        # CROSS-SYSTEM COLLISION BACKFILL (2026-07-27). A selected name may
+        # already be held by ANOTHER system — on 2026-07-27 the capped top-3
+        # was MU / CAT / UNP while swing held UNP, so the broker refused the
+        # duplicate and this desk quietly ran 2-of-3 for days. The slot was
+        # not empty by design; it was lost to a collision nobody logged.
+        # Distinguish carefully: a name this desk ALREADY owns is fine (it
+        # simply stays); a name owned by another system is unavailable and
+        # its slot must be refilled from further down the ranking, honouring
+        # the same sector cap.
+        def _owner(t):
+            p = self._broker.positions.get(t)
+            return p.system if p is not None else None
+
+        blocked = [t for _, t in selection
+                   if _owner(t) is not None and _owner(t) is not System.XSECTMOM]
+        if blocked:
+            selection = [(r, t) for r, t in selection if t not in blocked]
+            used_sectors = {}
+            for _, t in selection:
+                sec = sector_of(t)
+                used_sectors[sec] = used_sectors.get(sec, 0) + 1
+            chosen = {t for _, t in selection}
+            backfilled = []
+            for ret2, t2 in scored:
+                if len(chosen) >= XSECT.top_n:
+                    break
+                if t2 in chosen or t2 in blocked:
+                    continue
+                own2 = _owner(t2)
+                if own2 is not None and own2 is not System.XSECTMOM:
+                    continue
+                sec2 = sector_of(t2)
+                if XSECT_SECTOR_CAP > 0 and \
+                        used_sectors.get(sec2, 0) >= XSECT_SECTOR_CAP:
+                    continue
+                used_sectors[sec2] = used_sectors.get(sec2, 0) + 1
+                chosen.add(t2)
+                selection.append((ret2, t2))
+                backfilled.append(f"{t2}[{sec2}]({ret2:+.1%})")
+            log.warning("xsect rebalance: %s held by another system — slot(s) "
+                        "refilled with %s", ", ".join(blocked),
+                        ", ".join(backfilled) or "NOTHING AVAILABLE (ranking "
+                        "exhausted under the sector cap; running short)")
+            target = {t for _, t in selection}
+
         for ret, ticker in selection:
             if ticker in self._broker.positions:
                 continue
