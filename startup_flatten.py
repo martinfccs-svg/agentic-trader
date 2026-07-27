@@ -48,12 +48,24 @@ def _wanted() -> list[str]:
 
 
 def announce() -> None:
-    """Call once at boot so an armed instruction is impossible to miss."""
+    """Call once at boot. ALWAYS logs — armed or not.
+
+    An earlier version returned silently when FLATTEN_TICKERS was empty, and
+    that silence was indistinguishable from "the code never ran". A whole
+    debugging session went into deciding which had happened (2026-07-27). The
+    rule this system already applies to flags applies here: state the fact,
+    do not leave it to inference.
+    """
     global _announced
-    tickers = _wanted()
-    if not tickers or _announced:
+    if _announced:
         return
     _announced = True
+    tickers = _wanted()
+    if not tickers:
+        log.warning("FLATTEN_TICKERS is NOT set — operator flatten is inert. "
+                    "(This line proves startup_flatten loaded and ran; its "
+                    "absence would mean the module never executed.)")
+        return
     log.critical("FLATTEN_TICKERS IS ARMED: %s — the bot will CLOSE these "
                  "positions at the next market open, without further "
                  "confirmation. This is an operator instruction, not a "
