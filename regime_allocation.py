@@ -91,9 +91,12 @@ PERSIST_DAYS = int(os.getenv("REGIME_PERSIST_DAYS", "3"))
 PERSIST_LOOKBACK = int(os.getenv("REGIME_PERSIST_LOOKBACK", "12"))
 CONF_BLEND = os.getenv("REGIME_ALLOC_CONF_BLEND", "on").strip().lower() not in (
     "off", "false", "0", "no")
-MAX_STEP = float(os.getenv("REGIME_ALLOC_MAX_STEP", "0.20"))
-STATE_PATH = os.getenv("REGIME_ALLOC_STATE",
-                       "/data/regime_alloc_state.json")
+# NOTE: no smoothing state is persisted. Gradual transitions come from
+# confidence blending (stateless) and PERSIST_DAYS confirmation (also
+# stateless, by re-classifying prior sessions). Earlier drafts declared
+# MAX_STEP / STATE_PATH knobs for calendar interpolation; both were removed
+# rather than left dangling — an unused env var invites the assumption that
+# a feature exists.
 SLOPE_DAYS = 20
 SLOPE_TOL = 0.005      # EMA50 may sag 0.5% over SLOPE_DAYS and still be "up"
                        # (a pullback inside an uptrend is not a regime change)
@@ -334,6 +337,7 @@ def classify(spy_close: list[float], spy_high: list[float],
 # ------------------------------------------------------ live entry points
 _cache: tuple[float, RegimeState] | None = None
 _last_label: str | None = None
+_clamp_logged: dict[str, float] = {}   # system -> last multiplier logged
 
 
 def _classify_at(feed, universe, offset: int) -> Optional[RegimeState]:
@@ -547,9 +551,24 @@ def apply_to_shares(shares: float, feed, system: str, equity: float,
             from config import max_position_dollars
             cap = max_position_dollars(equity) / price
             if out > cap:
-                log.warning("regime sizing %s: x%.2f would breach the "
-                            "notional cap (%.2f -> %.2f shares); clamped to "
-                            "%.2f", system, mult, shares, out, cap)
+                # Throttled (2026-07-27): this fired 161 times in one session
+                # for intraday, because its structure stops are tight enough
+                # that risk-based sizing ALWAYS exceeds the 10%-of-equity cap
+                # — so a lean-in multiplier is clamped away every time and the
+                # regime has no effect on that desk. That is the cap working
+                # as intended, not an anomaly, so it is stated once per
+                # (system, multiplier) rather than on every signal.
+                key = (system, round(mult, 2))
+                if _clamp_logged.get(system) != key[1]:
+                    _clamp_logged[system] = key[1]
+                    log.warning("regime sizing %s: x%.2f exceeds the "
+                                "notional cap on every signal (%.2f -> %.2f "
+                                "shares, capped at %.2f). The cap binds "
+                                "first, so the regime lean-in is INERT for "
+                                "this desk until stops widen or the "
+                                "multiplier drops below 1.0. Logged once "
+                                "per multiplier value.",
+                                system, mult, shares, out, cap)
                 out = cap
         except Exception as e:  # noqa: BLE001 — never break sizing over a clamp
             log.error("regime notional clamp failed (%s) — using unclamped "
