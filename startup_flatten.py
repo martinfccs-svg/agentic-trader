@@ -40,6 +40,8 @@ log = logging.getLogger("startup_flatten")
 
 _done: set[str] = set()      # closed by THIS process; avoids double attempts
 _announced = False
+_pending_logged: str | None = None   # throttle: the waiting notice repeats
+                                     # every cycle, ~930 lines overnight
 
 
 def _wanted() -> list[str]:
@@ -84,9 +86,17 @@ def run(broker, feed, engines, market_is_open: bool) -> int:
     if not outstanding:
         return 0
     if not market_is_open:
-        log.warning("FLATTEN pending for %s — market is CLOSED, waiting for "
-                    "the open rather than selling at a stale quote",
-                    ", ".join(outstanding))
+        # Throttled: this is a WAITING state, not an event. Logging it every
+        # cycle produced ~930 identical lines overnight (each mapped to
+        # Railway severity=error), which would bury the actual FLATTEN CLOSED
+        # lines at the open. Re-logs only when the pending set changes.
+        global _pending_logged
+        key = ",".join(outstanding)
+        if _pending_logged != key:
+            _pending_logged = key
+            log.warning("FLATTEN pending for %s — market is CLOSED, waiting "
+                        "for the open rather than selling at a stale quote. "
+                        "Logged once; silent until this list changes.", key)
         return 0
 
     # The trade logger lives on the engines, not in the cycle signature;
