@@ -44,6 +44,10 @@ ENABLED = os.getenv("REGIME_FILTER", "on").strip().lower() not in (
 SYMBOL = os.getenv("REGIME_SYMBOL", "SPY")
 SMA_DAYS = int(os.getenv("REGIME_SMA_DAYS", "200"))
 TTL = float(os.getenv("REGIME_TTL_SECS", "1800"))
+# Failures get a short retry, not the full TTL: at boot SPY has no bars yet,
+# and caching that fail-open answer for 30 minutes left the gate blind long
+# after data was available.
+FAIL_TTL = float(os.getenv("REGIME_FAIL_TTL_SECS", "60"))
 
 _cache: tuple[float, bool] | None = None      # (checked_at, risk_on)
 _last_state: bool | None = None
@@ -61,6 +65,7 @@ def risk_on(feed) -> bool:
         return _cache[1]
 
     state = True
+    failed = False
     try:
         bars = feed.get_daily_bars(SYMBOL)
         closes = getattr(bars, "close", None) if bars is not None else None
@@ -89,8 +94,11 @@ def risk_on(feed) -> bool:
                 except Exception:  # noqa: BLE001 — mirror is best-effort
                     pass
                 _last_state = state
+        failed = False
     except Exception as e:  # noqa: BLE001 — overlay must never break a cycle
-        log.error("regime: check failed (%s) — failing open (risk-on)", e)
+        log.error("regime: check failed (%s) — failing open (risk-on), "
+                  "retrying in %.0fs", e, FAIL_TTL)
+        failed = True
 
-    _cache = (now, state)
+    _cache = (now - (TTL - FAIL_TTL) if failed else now, state)
     return state
