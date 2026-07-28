@@ -70,6 +70,11 @@ log = logging.getLogger("regime_allocation")
 
 MODE = os.getenv("REGIME_ALLOC", "shadow").strip().lower()
 TTL = float(os.getenv("REGIME_ALLOC_TTL_SECS", "3600"))
+# A FAILED classification must not be cached for the full TTL. At boot the
+# feed has no SPY bars yet, so the first call fails open to WEAK_BULL — and
+# with a 1-hour TTL that neutral verdict then stuck for an hour, long after
+# the data arrived. Failures are re-tried on this much shorter cadence.
+FAIL_TTL = float(os.getenv("REGIME_ALLOC_FAIL_TTL_SECS", "60"))
 FLOOR_MULT = float(os.getenv("REGIME_ALLOC_FLOOR", "0.25"))
 SYMBOL = os.getenv("REGIME_SYMBOL", "SPY")
 
@@ -184,6 +189,7 @@ class RegimeState:
     adx: Optional[float] = None
     confidence: int = 0                        # 0-100, factor decisiveness
     detail: str = ""
+    failed: bool = False        # True when this is a fail-open placeholder
     multipliers: dict[str, float] = field(default_factory=dict)
 
     def multiplier(self, system: str) -> float:
@@ -487,9 +493,11 @@ def current(feed, universe=None) -> RegimeState:
                      "holding %s", _raw, _run, PERSIST_DAYS, st.label)
     except Exception as e:  # noqa: BLE001 — an overlay must never break a cycle
         log.error("regime_allocation: classify failed (%s) — FAILING OPEN to "
-                  "%s / all multipliers 1.0", e, NEUTRAL)
+                  "%s / all multipliers 1.0, retrying in %.0fs", e, NEUTRAL,
+                  FAIL_TTL)
         st = RegimeState(label=NEUTRAL, detail=f"failed open: {e}")
         st.multipliers = dict(ALLOCATION[NEUTRAL])
+        st.failed = True
 
     if st.label != _last_label:
         _last_label = st.label
@@ -526,7 +534,9 @@ def current(feed, universe=None) -> RegimeState:
                          mode=MODE, multipliers=st.multipliers)
         except Exception:  # noqa: BLE001 — mirror is best-effort
             pass
-    _cache = (now, st)
+    # short-cache failures so a transient gap cannot freeze the regime
+    _cache = (now - (TTL - FAIL_TTL) if getattr(st, "failed", False) else now,
+              st)
     return st
 
 
