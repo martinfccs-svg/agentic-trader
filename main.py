@@ -114,26 +114,19 @@ def build():
         import regime as _rg
         import regime_allocation as _ra
         import loss_cooldown as _lc
-        import startup_flatten as _sf
         log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
                     "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
                     "REGIME_FILTER=%s MEANREV_SCORING=%s "
                     "MEANREV_SCORE_MIN=%d REGIME_ALLOC=%s "
-                    "SWING_LOSS_COOLDOWN_DAYS=%d FLATTEN_TICKERS=%s",
+                    "SWING_LOSS_COOLDOWN_DAYS=%d",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
-                    _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
-                    ",".join(_sf._wanted()) or "(none)")
+                    _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0))
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
                          "INTRADAY_ENTRIES=false NOW.")
     except Exception as e:  # noqa: BLE001 — banner must never block boot
         log.error("gate banner failed (non-fatal): %s", e)
-    try:
-        import startup_flatten
-        startup_flatten.announce()
-    except Exception as e:  # noqa: BLE001
-        log.error("flatten announce failed (non-fatal): %s", e)
     return feed, broker, logger, kill, swing, intraday, meanrev, xsect, router, scanner, engines
 
 
@@ -205,16 +198,6 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
         intraday.flatten_all("near close")
-
-    # Operator-ordered flatten (2026-07-27). Runs only while the market is
-    # open, only on tickers still held, and never gated by kill switch or
-    # regime — reducing risk is always allowed. Placed after the engines have
-    # managed their books so it cannot race an engine's own exit.
-    try:
-        import startup_flatten
-        startup_flatten.run(broker, feed, engines, is_open)
-    except Exception as e:  # noqa: BLE001 — must never break a cycle
-        log.error("operator flatten failed (non-fatal): %s", e)
 
     # Regime allocation (2026-07-24): the CIO layer. Classified once per
     # cycle (TTL-cached inside, so this is cheap) purely so the label and
