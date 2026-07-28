@@ -158,8 +158,13 @@ class IntradayRiskEngine:
                         signal.ticker, e)
         card_str = ""
         if card:
-            card_str = (" | v2: score=%.2f gates[win=%s mkt=%s rv=%s vol=%s] "
-                        "v2_stop=%s (v6_stop=%.2f)"
+            # Label note (2026-07-28): "win" was read by a reviewer as a
+            # win-RATE prediction ("the model says this trade won't be
+            # profitable"). Nothing in this system predicts profitability.
+            # It is the trading-WINDOW gate — the clock. Renamed to remove
+            # the ambiguity, same class of fix as leg_or_manual -> bracket_leg.
+            card_str = (" | v2: score=%.2f gates[time=%s mkt=%s rv=%s "
+                        "vol=%s] v2_stop=%s (v6_stop=%.2f)"
                         % (card.score, card.gate_window, card.gate_market,
                            card.gate_rv, card.gate_volband,
                            card.v2_stop, stop))
@@ -171,8 +176,11 @@ class IntradayRiskEngine:
                              f"v2 gate: score={card.score:.2f} "
                              f"gates_ok={card.gates_ok}")
             _log_reject(signal.ticker,
-                        "v2 gate score=%.2f (min %.2f) gates[win=%s mkt=%s "
-                        "rv=%s vol=%s]" % (card.score, ids.SCORE_MIN,
+                        "v2 gate score=%.2f (min %.2f) gates[time=%s "
+                        "mkt=%s rv=%s vol=%s] (time=trading window "
+                        "9:35-11:15 / 13:30-15:30 ET; mkt=SPY above VWAP "
+                        "and EMA50; rv=relative volume; vol=ATR%% band)"
+                        % (card.score, ids.SCORE_MIN,
                                            card.gate_window, card.gate_market,
                                            card.gate_rv, card.gate_volband))
             return
