@@ -46,6 +46,7 @@ from scan_health import DailyRebalanceGate
 import regime
 import regime_allocation
 from sector_map import sector_of
+import xsect_persistence as xp
 
 log = logging.getLogger("xsectmom")
 
@@ -60,6 +61,41 @@ XSECT_MIN_RANKABLE = int(os.getenv("XSECT_MIN_RANKABLE", "0"))
 # tickers. Cap=1 forces the rotation to express N DIFFERENT bets. 0 disables
 # (restores uncapped behavior). Sector labels come from sector_map.py.
 XSECT_SECTOR_CAP = int(os.getenv("XSECT_SECTOR_CAP", "1"))
+
+# ---------------------------------------------------------------------------
+# ABSOLUTE MOMENTUM FILTER (2026-07-28). A pure relative ranking always has a
+# top 3 — including in a bear market, where the top 3 of 68 are simply the
+# least-bad losers. This requires each candidate to be rising on its own
+# terms before it can be ranked at all: price above its 200-EMA, 50-EMA above
+# 200-EMA, and a positive lookback return. Three standard conditions, no
+# tuning surface. The portfolio regime gate covers the market; this covers
+# the NAME. XSECT_ABS_MOMENTUM=off restores pure relative ranking.
+# ---------------------------------------------------------------------------
+ABS_MOMENTUM = os.getenv("XSECT_ABS_MOMENTUM", "on").strip().lower() not in (
+    "off", "false", "0", "no")
+
+# Dynamic trailing stop (2026-07-28). The protective stop was set once at
+# entry and never moved: ARM sat at entry 242.25 / stop 165.17, so a name
+# could round-trip a 50% gain without the stop ever following. Rotation is
+# still the PRIMARY exit — the trail is deliberately loose so it protects
+# catastrophe without second-guessing a name that still ranks.
+TRAIL_ENABLED = os.getenv("XSECT_TRAIL", "on").strip().lower() not in (
+    "off", "false", "0", "no")
+TRAIL_TIER1_GAIN = float(os.getenv("XSECT_TRAIL_T1_GAIN", "0.10"))
+TRAIL_TIER1_ATR = float(os.getenv("XSECT_TRAIL_T1_ATR", "3.0"))
+TRAIL_TIER2_GAIN = float(os.getenv("XSECT_TRAIL_T2_GAIN", "0.20"))
+TRAIL_TIER2_ATR = float(os.getenv("XSECT_TRAIL_T2_ATR", "2.0"))
+
+
+def _ema(values, n):
+    """EMA over a close series. Local to keep this module stdlib-only."""
+    if len(values) < n:
+        return None
+    k = 2.0 / (n + 1)
+    e = sum(values[:n]) / n
+    for v in values[n:]:
+        e = v * k + e * (1 - k)
+    return e
 
 
 class NullNotifier:
@@ -94,7 +130,8 @@ class CrossSectionalMomentumEngine:
         later, only for the few names actually being traded."""
         scored = []
         stats = {"universe": len(self._universe), "no_bars": 0,
-                 "no_return": 0, "price_reject": 0, "liquidity_reject": 0}
+                 "no_return": 0, "price_reject": 0, "liquidity_reject": 0,
+                 "abs_momentum_reject": 0}
         for t in self._universe:
             bars = self._feed.get_daily_bars(t)
             if bars is None or not bars.close:
@@ -113,6 +150,20 @@ class CrossSectionalMomentumEngine:
             if (daily_dv or 0) < MIN_DOLLAR_VOL:
                 stats["liquidity_reject"] += 1
                 continue
+            # ---- ABSOLUTE MOMENTUM ------------------------------------
+            # Rank only names that are rising on their own terms. Without
+            # this, a downtrend still produces a "top 3" and the desk buys
+            # the least-bad losers. Insufficient history does NOT reject:
+            # the lookback gate above already handled that.
+            if ABS_MOMENTUM:
+                closes = bars.close
+                e200 = _ema(closes, 200)
+                e50 = _ema(closes, 50)
+                if e200 is not None and e50 is not None:
+                    if not (closes[-1] > e200 and e50 > e200 and ret > 0):
+                        stats["abs_momentum_reject"] = \
+                            stats.get("abs_momentum_reject", 0) + 1
+                        continue
             scored.append((ret, t))
         scored.sort(reverse=True)
         return scored, stats
@@ -210,6 +261,34 @@ class CrossSectionalMomentumEngine:
 
         target = {t for _, t in selection}
 
+        # ---- RANK PERSISTENCE (2026-07-28) --------------------------------
+        # Record this rebalance's streaks, then apply hysteresis at BOTH ends.
+        # Fixes a measured problem: 51-58 rotations/year on 3 slots, and 9
+        # INTC / 9 ARM round trips in the autopsy — the ranking oscillating
+        # around the boundary, not nine independent decisions.
+        ranked_tickers = [t for _, t in scored]
+        try:
+            streaks = xp.update(ranked_tickers, XSECT.top_n)
+        except Exception as e:  # noqa: BLE001 — fail open to old behaviour
+            log.error("xsect: persistence update failed (%s) — hysteresis "
+                      "skipped this rebalance", e)
+            streaks = {}
+
+        # EXIT side: keep a holding that merely slipped out of the top N but
+        # is still inside the exit band. Slipping from 3rd to 4th is noise.
+        reprieved = []
+        for ticker in sorted(held - target):
+            try:
+                keep, why = xp.should_hold(ticker, ranked_tickers, XSECT.top_n)
+            except Exception:  # noqa: BLE001
+                keep, why = False, "hysteresis unavailable"
+            if keep:
+                reprieved.append(f"{ticker} ({why})")
+                target.add(ticker)
+        if reprieved:
+            log.warning("xsect rebalance: HOLDING %s — inside the exit band, "
+                        "not churned out", "; ".join(reprieved))
+
         # Sell names that fell out of the top N.
         for ticker in sorted(held - target):
             q = self._feed.get_quote(ticker)
@@ -228,8 +307,9 @@ class CrossSectionalMomentumEngine:
                         entry_price=entry_price, pnl=realized,
                         system=System.XSECTMOM.value,
                     )
-                log.warning("xsect rebalance: EXIT %s (fell out of top%d)",
-                            ticker, XSECT.top_n)
+                log.warning("xsect rebalance: EXIT %s (past the exit band, "
+                            "rank > %d)", ticker,
+                            xp.exit_rank_threshold(XSECT.top_n))
             except Exception as e:  # noqa: BLE001 — one exit must not block the rest
                 log.error("xsect rebalance: exit %s failed (retry next "
                           "rebalance): %s", ticker, e)
@@ -283,6 +363,14 @@ class CrossSectionalMomentumEngine:
 
         for ret, ticker in selection:
             if ticker in self._broker.positions:
+                continue
+            # ENTRY side: a one-day visit to the top does not earn capital.
+            try:
+                ok, why = xp.entry_allowed(ticker, streaks)
+            except Exception:  # noqa: BLE001
+                ok, why = True, "hysteresis unavailable — failing open"
+            if not ok:
+                log.warning("xsect rebalance: DEFER %s — %s", ticker, why)
                 continue
             q = self._feed.get_quote(ticker)
             if q is None or q.atr is None:
@@ -351,6 +439,34 @@ class CrossSectionalMomentumEngine:
             # of 612.10. If ATR has collapsed since entry so that the
             # entry-anchored stop sits AT OR ABOVE the live price, anchor to
             # price instead — a stop above the market is the Jul 16 bug.
+            # ---- DYNAMIC TRAILING STOP (2026-07-28) ----------------------
+            # The stop used to be set once at entry and never move: ARM sat
+            # at entry 242.25 / stop 165.17, so a name could give back a 50%
+            # gain with the stop still parked below the entry. Rotation
+            # remains the PRIMARY exit, so the trail is deliberately loose —
+            # it protects catastrophe without forcing a sale the ranking did
+            # not ask for. Ratchets UP only; never widens.
+            if TRAIL_ENABLED and q.atr and pos.stop_price and pos.entry_price:
+                pos.high_water = max(pos.high_water or pos.entry_price,
+                                     q.price)
+                gain = (pos.high_water / pos.entry_price) - 1.0
+                mult = None
+                if gain >= TRAIL_TIER2_GAIN:
+                    mult = TRAIL_TIER2_ATR
+                elif gain >= TRAIL_TIER1_GAIN:
+                    mult = TRAIL_TIER1_ATR
+                if mult is not None:
+                    trailed = pos.high_water - mult * q.atr
+                    if trailed > pos.stop_price:
+                        prev = pos.stop_price
+                        pos.stop_price = trailed
+                        log.warning("xsect trail %s: +%.1f%% from entry -> "
+                                    "stop %.2f -> %.2f (%.1fxATR below high "
+                                    "water %.2f). LOCAL stop; the broker leg "
+                                    "still sits at its original level.",
+                                    ticker, gain * 100, prev, trailed, mult,
+                                    pos.high_water)
+
             if not pos.stop_price and q.atr:
                 derived = pos.entry_price - XSECT.atr_stop_multiple * q.atr
                 if derived >= q.price:
@@ -385,4 +501,3 @@ class CrossSectionalMomentumEngine:
                 except Exception as e:  # noqa: BLE001
                     log.error("xsect stop-exit %s failed (will retry next "
                               "cycle): %s", ticker, e)
-
