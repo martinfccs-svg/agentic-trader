@@ -15,6 +15,7 @@ from models import Action, Signal, System
 from risk import position_size
 import regime_allocation
 import loss_cooldown
+import correlation_manager
 from safety import market_is_open
 
 log = logging.getLogger("swing")
@@ -99,6 +100,16 @@ class SwingRiskEngine:
         # Returns 1.0 unless REGIME_ALLOC=live.
         shares, _alloc = regime_allocation.apply_to_shares(
             shares, self._feed, "swing", self._broker.equity, q.price)
+        # Portfolio correlation (2026-07-29): the portfolio question, not the
+        # trade question. Swing could hold RTX and LMT at once — two defence
+        # names, one bet — and nothing noticed. Measure-only until
+        # CORRELATION_MAX is set.
+        shares, _corr = correlation_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.SWING)
+        if shares <= 0:
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK,
+                             "correlation with existing holdings")
+            return
         if _alloc != 1.0:
             log.info("swing regime sizing %s: x%.2f -> shares=%.2f",
                      signal.ticker, _alloc, shares)
