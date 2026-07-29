@@ -17,6 +17,7 @@ from indicators import rsi
 import meanrev_scoring as mrs
 import portfolio_risk
 import regime_allocation
+import correlation_manager
 from models import Action, Signal, System
 from risk import position_size
 from safety import market_is_open
@@ -98,6 +99,14 @@ class MeanReversionEngine:
         # Regime allocation (2026-07-24): shares only; 1.0 unless live.
         shares, _alloc = regime_allocation.apply_to_shares(
             shares, self._feed, "meanrev", self._broker.equity, q.price)
+        # Portfolio correlation (2026-07-29): shared service, same rule for
+        # every desk. Measure-only until CORRELATION_MAX is set.
+        shares, _corr = correlation_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.MEANREV)
+        if shares <= 0:
+            self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK,
+                             "correlation with existing holdings")
+            return
         if _alloc != 1.0:
             log.info("meanrev regime sizing %s: x%.2f -> shares=%.2f",
                      signal.ticker, _alloc, shares)
