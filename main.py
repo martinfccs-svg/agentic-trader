@@ -114,13 +114,16 @@ def build():
         import regime as _rg
         import regime_allocation as _ra
         import loss_cooldown as _lc
+        import correlation_manager as _cm
         log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
                     "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
                     "REGIME_FILTER=%s MEANREV_SCORING=%s "
                     "MEANREV_SCORE_MIN=%d REGIME_ALLOC=%s "
-                    "SWING_LOSS_COOLDOWN_DAYS=%d",
+                    "SWING_LOSS_COOLDOWN_DAYS=%d CORRELATION_MODE=%s "
+                    "(warn %.2f / block %.2f)",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
-                    _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0))
+                    _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
+                    _cm.MODE, _cm.WARN_CORR, _cm.BLOCK_CORR)
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
