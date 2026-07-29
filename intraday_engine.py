@@ -13,6 +13,7 @@ import os
 import audit
 import intraday_scoring as ids
 import regime_allocation
+import correlation_manager
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import atr, avg_dollar_volume
 from models import Action, Signal, System
@@ -124,6 +125,15 @@ class IntradayRiskEngine:
         # Regime allocation (2026-07-24): shares only; 1.0 unless live.
         shares, _alloc = regime_allocation.apply_to_shares(
             shares, self._feed, "intraday", self._broker.equity, q.price)
+        # Portfolio correlation (2026-07-29): shared service, same rule for
+        # every desk. Measure-only until CORRELATION_MAX is set.
+        shares, _corr = correlation_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.INTRADAY)
+        if shares <= 0:
+            _log_reject(signal.ticker, "correlation with existing holdings")
+            self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
+                             "correlation with existing holdings")
+            return
         if _alloc != 1.0:
             log.info("intraday regime sizing %s: x%.2f -> shares=%.2f",
                      signal.ticker, _alloc, shares)
