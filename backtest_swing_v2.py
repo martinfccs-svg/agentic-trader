@@ -69,6 +69,7 @@ from swing_v2 import (detect_setup, ema, atr, RISK_PCT, MAX_NOTIONAL_PCT,   # no
                       MAX_CONCURRENT, MAX_NEW_PER_DAY, SETUP_EXPIRY_DAYS,
                       TIME_STOP_DAYS, VOL_MULT_B)
 from meanrev_scoring import adx as _adx   # Wilder ADX, already unit-tested
+_adx_bt = _adx
 
 
 def _rsi(values, period=14):
@@ -220,7 +221,17 @@ def fetch_bars(symbols, days):
     return out
 
 
-def run_config(all_bars, dates, variant, simple_exit, start_equity, cost):
+def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
+               exits=None):
+    """exits: {"trail_atr":float, "trail_after_r":float, "vol_exit":float,
+    "adx_decay":float}; 0 disables each. The live engine reads these from
+    env vars; the harness takes them as arguments so one process can replay
+    several configurations and compare them (2026-08-01)."""
+    exits = exits or {}
+    TRAIL = float(exits.get("trail_atr", 0) or 0)
+    TRAIL_AFTER = float(exits.get("trail_after_r", 1.0) or 1.0)
+    VOLX = float(exits.get("vol_exit", 0) or 0)
+    ADXD = float(exits.get("adx_decay", 0) or 0)
     equity = start_equity
     cash_curve = [equity]
     positions = {}       # sym -> dict
@@ -239,6 +250,15 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost):
             p["held"] += 1
             closes = _closes_upto(all_bars[sym], today)
             e20 = ema(closes, 20)
+            hist = _bars_upto(all_bars[sym], today, inclusive=True)
+            atr_now = atr(hist, 14) if (TRAIL or VOLX) else None
+            p["hw"] = max(p.get("hw", p["e"]), b["c"])
+
+            # --- adaptive ATR trail: ratchets up only, after TRAIL_AFTER R
+            if TRAIL and atr_now and p["r"] > 0 \
+                    and p["hw"] >= p["e"] + TRAIL_AFTER * p["r"]:
+                p["stop"] = max(p["stop"], p["hw"] - TRAIL * atr_now)
+
             fill = None; reason = None
             if b["o"] <= p["stop"]:
                 fill, reason = b["o"], "gap_stop"
@@ -249,6 +269,16 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost):
                 n = p["sh"] // 2
                 equity += n * (px - p["e"]) - n * px * cost
                 p["sh"] -= n; p["half"] = True; p["stop"] = p["e"]
+            # --- volatility expansion: sized for entry ATR, not this ---
+            if not fill and VOLX and atr_now and p.get("atr0", 0) > 0 \
+                    and atr_now > VOLX * p["atr0"]:
+                fill, reason = b["c"], "vol_expansion"
+            # --- ADX decay: the trend that justified the entry is gone ---
+            if not fill and ADXD and p.get("adx0", 0) > 0:
+                a_now = _adx_bt([x["h"] for x in hist], [x["l"] for x in hist],
+                                [x["c"] for x in hist], 14)
+                if a_now is not None and a_now < ADXD * p["adx0"]:
+                    fill, reason = b["c"], "adx_decay"
             if not fill and e20 and b["c"] < e20 and p["held"] >= 2:
                 fill, reason = b["c"], "ema20"
             if not fill and p["held"] >= TIME_STOP_DAYS and b["c"] < p["e"] + p["r"]:
@@ -260,11 +290,19 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost):
                                "held": p["held"]})
                 del positions[sym]
         # 2) detect fresh setups on yesterday's completed bar
+        # SPY closes are passed as the relative-strength benchmark (added
+        # 2026-08-01). detect_setup's bench argument defaults to None, which
+        # SKIPS the RS gate — so without this the harness would silently
+        # measure the OLD strategy while the live code ran the new one, and
+        # the backtest would be answering a question nobody asked.
+        bench_hist = [b["c"] for b in
+                      _bars_upto(all_bars.get("SPY", []), today,
+                                 inclusive=False)] or None
         for sym in syms:
             hist = _bars_upto(all_bars[sym], today, inclusive=False)
             if len(hist) < 60:
                 continue
-            s, why = detect_setup(sym, hist)
+            s, why = detect_setup(sym, hist, bench_hist)
             if s:
                 setups[sym] = (s, di)
         # expire
@@ -298,7 +336,9 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost):
                     continue
                 equity -= sh * entry_px * cost
                 positions[sym] = {"e": entry_px, "stop": stop, "r": dist,
-                                  "sh": sh, "half": False, "held": 0}
+                                  "sh": sh, "half": False, "held": 0,
+                                  "hw": entry_px, "atr0": s.atr14,
+                                  "adx0": getattr(s, "adx_at_setup", 0.0)}
                 entries_today += 1
                 del setups[sym]
         # 4) mark equity
@@ -343,31 +383,223 @@ def stats(curve, trades, years):
             if len(wins) < len(trades) else 0}
 
 
+
+
+def _resolve_universe(a):
+    """(symbols, source). Config first, explicit file second, hardcoded list
+    only as a loudly-named last resort — a silent DEFAULT_SYMBOLS fallback is
+    how a run meant for the real 68 quietly tested 10 names instead."""
+    if getattr(a, "symbols_file", None):
+        syms = [l.strip().upper() for l in open(a.symbols_file)
+                if l.strip() and not l.startswith("#")]
+        return syms, a.symbols_file
+    try:
+        from config import UNIVERSE
+        return [t.strip().upper() for t in UNIVERSE], "config.UNIVERSE"
+    except Exception as e:  # noqa: BLE001
+        return DEFAULT_SYMBOLS, (f"DEFAULT_SYMBOLS fallback — could NOT "
+                                 f"import UNIVERSE from config.py ({e}); run "
+                                 f"from the repo directory")
+
+
+# ---------------------------------------------------------------------------
+# EXIT SWEEP + PROMOTION RULES
+#
+# Stated BEFORE the numbers are seen, which is the whole point: a rule chosen
+# after looking at results is not a rule, it is a preference wearing one. The
+# thresholds below encode what "better" means for a low-drawdown pullback
+# sleeve, and every candidate is judged by the same test on BOTH windows.
+#
+# Why "both windows" is not optional: the same 365-day window has produced
+# Sharpe readings of 0.30, 0.77 and 1.50 for this strategy across runs, and a
+# 77-setting sweep spanned -0.05 to 1.62. A single-window improvement is
+# indistinguishable from a lucky draw.
+# ---------------------------------------------------------------------------
+MIN_SHARPE_GAIN = 0.05      # must beat baseline by at least this
+MAX_DD_WORSENING = 0.005    # 0.5pp; drawdown is this strategy's ONLY robust edge
+MIN_TRADES = 30             # below this the statistics are anecdote
+
+EXIT_VARIANTS = [
+    ("baseline",     {}),
+    ("+ ATR trail",  {"trail_atr": 2.0, "trail_after_r": 1.0}),
+    ("+ vol exit",   {"vol_exit": 1.8}),
+    ("+ ADX decay",  {"adx_decay": 0.6}),
+]
+
+
+def sweep_exits(a):
+    base, src = _resolve_universe(a)
+    print(f"Universe: {len(base)} symbols from {src}")
+    windows = [365, 730]
+    results = {}
+    for days in windows:
+        print(f"\n=== fetching {days}d window ===")
+        fetch_syms = base + (["SPY"] if "SPY" not in base else [])
+        bars = fetch_bars(fetch_syms, days)
+        dates = sorted({b["t"][:10] for s in bars for b in bars[s]})
+        replay = dates[60:]
+        years = max(len(replay) / 252, 1e-9)
+        print(f"replay window: {len(replay)} trading days ({years:.2f} yr)")
+        for name, cfg in EXIT_VARIANTS:
+            curve, trades = run_config(bars, dates, "A", False, 100_000,
+                                       a.cost_bps / 10000, exits=cfg)
+            results[(days, name)] = stats(curve, trades, years)
+
+    for days in windows:
+        print(f"\n{'='*92}\n{days}-DAY WINDOW\n{'='*92}")
+        print(f"{'configuration':<16}{'sharpe':>9}{'total':>9}{'maxdd':>9}"
+              f"{'trades':>9}{'win%':>8}{'d-sharpe':>10}{'d-maxdd':>10}")
+        b = results[(days, "baseline")]
+        for name, _ in EXIT_VARIANTS:
+            r = results[(days, name)]
+            ds = r["sharpe"] - b["sharpe"]
+            dd = abs(r["maxdd"]) - abs(b["maxdd"])
+            print(f"{name:<16}{r['sharpe']:>9.2f}{r['total']:>8.1%}"
+                  f"{r['maxdd']:>9.1%}{r['trades']:>9}{r['win%']:>8.1f}"
+                  + ("" if name == "baseline"
+                     else f"{ds:>+10.2f}{dd:>+10.1%}"))
+
+    lines = _promotion_report(results, windows)
+    for ln in lines:
+        print(ln)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = f"BACKTEST_RESULTS_{stamp}.md"
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_markdown_report(results, windows, a, stamp))
+        print(f"\nreport written: {path}")
+        print("  (results belong in a dated document, not in a tool's "
+              "docstring — a number in source cannot say WHEN it was true)")
+    except Exception as e:  # noqa: BLE001
+        print(f"\ncould not write {path}: {e}")
+
+
+def _verdict(results, windows, name):
+    """Per-window checks plus the BINDING reason when a variant is rejected."""
+    per_window, promote = [], True
+    fails = []
+    for days in windows:
+        r, b = results[(days, name)], results[(days, "baseline")]
+        ds = r["sharpe"] - b["sharpe"]
+        dd = abs(r["maxdd"]) - abs(b["maxdd"])
+        checks = [
+            (ds >= MIN_SHARPE_GAIN, f"Sharpe {ds:+.2f}"
+             + ("" if ds >= MIN_SHARPE_GAIN else f" (need +{MIN_SHARPE_GAIN:.2f})")),
+            (dd <= MAX_DD_WORSENING,
+             f"Max DD {'improved' if dd < 0 else 'worsened'} {abs(dd):.1%}"
+             + ("" if dd <= MAX_DD_WORSENING else f" (limit {MAX_DD_WORSENING:.1%})")),
+            (r["trades"] >= MIN_TRADES, f"{r['trades']} trades"
+             + ("" if r["trades"] >= MIN_TRADES else f" (need {MIN_TRADES})")),
+        ]
+        ok = all(c[0] for c in checks)
+        promote &= ok
+        per_window.append((days, ok, checks))
+        if not ok:
+            if not checks[2][0]:
+                fails.append("insufficient sample size")
+            elif not checks[1][0]:
+                fails.append("drawdown worsened beyond the limit")
+            else:
+                fails.append("Sharpe gain below threshold")
+    reason = ""
+    if not promote:
+        # sample size invalidates the other metrics, so it outranks them
+        if "insufficient sample size" in fails:
+            reason = "insufficient sample size"
+        elif len(set(fails)) == 1:
+            reason = fails[0]
+        else:
+            reason = "; ".join(sorted(set(fails)))
+        if promote is False and all(w[1] for w in per_window[:1]) \
+                and not all(w[1] for w in per_window):
+            reason += " — held on one window only"
+    return promote, per_window, reason
+
+
+def _promotion_report(results, windows):
+    out = ["", "=" * 92, "PROMOTION REPORT", "=" * 92,
+           f"  rules, fixed before the run: Sharpe gain >= "
+           f"+{MIN_SHARPE_GAIN:.2f} | Max DD worsens <= "
+           f"{MAX_DD_WORSENING:.1%} | trades >= {MIN_TRADES}",
+           f"  every rule must hold on ALL windows: "
+           f"{', '.join(str(w) + 'd' for w in windows)}", ""]
+    for name, _ in EXIT_VARIANTS:
+        if name == "baseline":
+            continue
+        promote, per_window, reason = _verdict(results, windows, name)
+        out.append(f"  {name}")
+        for days, ok, checks in per_window:
+            out.append(f"    {days}-day window"
+                       + ("" if ok else "   <- fails here"))
+            for passed, text in checks:
+                out.append(f"      {'PASS' if passed else 'FAIL'}  {text}")
+        out.append(f"    Promotion: {'YES' if promote else 'NO'}"
+                   + ("" if promote else f"   Reason: {reason}"))
+        out.append("")
+    out.append("  A rejected variant is not necessarily bad — it is unproven")
+    out.append("  on this data, which for deployment purposes is the same "
+               "thing.")
+    return out
+
+
+def _markdown_report(results, windows, a, stamp) -> str:
+    md = [f"# Swing V2 exit sweep — {stamp}", "",
+          f"- universe: config.UNIVERSE ({len(_resolve_universe(a)[0])} names)",
+          f"- windows: {', '.join(str(w) + 'd' for w in windows)}",
+          f"- costs: {a.cost_bps} bps per side",
+          f"- rules fixed before the run: Sharpe gain >= "
+          f"+{MIN_SHARPE_GAIN:.2f}, Max DD worsens <= "
+          f"{MAX_DD_WORSENING:.1%}, trades >= {MIN_TRADES}, "
+          f"all windows", ""]
+    for days in windows:
+        md += [f"## {days}-day window", "",
+               "| configuration | sharpe | total | maxdd | trades | win% | "
+               "d-sharpe | d-maxdd |",
+               "|---|---:|---:|---:|---:|---:|---:|---:|"]
+        b = results[(days, "baseline")]
+        for name, _ in EXIT_VARIANTS:
+            r = results[(days, name)]
+            ds = r["sharpe"] - b["sharpe"]
+            dd = abs(r["maxdd"]) - abs(b["maxdd"])
+            delta = ("| | " if name == "baseline"
+                     else f"| {ds:+.2f} | {dd:+.1%} ")
+            md.append(f"| {name} | {r['sharpe']:.2f} | {r['total']:.1%} | "
+                      f"{r['maxdd']:.1%} | {r['trades']} | {r['win%']:.1f} "
+                      f"{delta}|")
+        md.append("")
+    md += ["## Verdicts", ""]
+    for name, _ in EXIT_VARIANTS:
+        if name == "baseline":
+            continue
+        promote, per_window, reason = _verdict(results, windows, name)
+        md.append(f"**{name} — {'PROMOTE' if promote else 'REJECT'}**"
+                  + ("" if promote else f" ({reason})"))
+        for days, ok, checks in per_window:
+            for passed, text in checks:
+                md.append(f"- {days}d: {'PASS' if passed else 'FAIL'} — {text}")
+        md.append("")
+    return "\n".join(md)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--cost-bps", type=float, default=5.0)
+    ap.add_argument("--sweep-exits", action="store_true",
+                    help="replay baseline + each adaptive exit one at a time, "
+                         "on BOTH windows, and apply the promotion rules")
     ap.add_argument("--symbols-file", default=None,
                     help="optional; omit to read UNIVERSE from config.py")
     a = ap.parse_args()
+    if a.sweep_exits:
+        sweep_exits(a)
+        return
 
     # Universe resolution, most-authoritative first. DEFAULT_SYMBOLS used to
     # be the silent fallback, which is how a run intended for the real
     # 68-name universe quietly tested 10 hardcoded names instead.
-    if a.symbols_file:
-        syms = [l.strip().upper() for l in open(a.symbols_file)
-                if l.strip() and not l.startswith("#")]
-        _src = a.symbols_file
-    else:
-        try:
-            from config import UNIVERSE
-            syms = [t.strip().upper() for t in UNIVERSE]
-            _src = "config.UNIVERSE"
-        except Exception as _e:  # noqa: BLE001
-            syms = DEFAULT_SYMBOLS
-            _src = (f"DEFAULT_SYMBOLS fallback — could NOT import UNIVERSE "
-                    f"from config.py ({_e}); run from the repo directory for "
-                    f"the real universe")
+    syms, _src = _resolve_universe(a)
     print(f"Universe: {len(syms)} symbols from {_src} | window ~{a.days}d | "
           f"cost {a.cost_bps}bps/side")
     # SPY must always be fetched even though it is not in the trading
