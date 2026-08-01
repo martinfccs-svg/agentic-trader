@@ -68,6 +68,58 @@ MAX_CONCURRENT = 5
 MAX_NEW_PER_DAY = 2
 SETUP_EXPIRY_DAYS = 3
 TIME_STOP_DAYS = 15
+# ---------------------------------------------------------------------------
+# TWO GATES ADDED 2026-08-01, both single-parameter and both reusing code
+# that already exists elsewhere in this system rather than inventing new
+# machinery:
+#
+#   RELATIVE STRENGTH — swing_v2 was the ONLY scored strategy without it.
+#   meanrev_scoring compares 63-day return vs SPY; intraday_scoring compares
+#   since-open return vs SPY. This closes that inconsistency with the same
+#   63-day window meanrev uses. A stock breaking out while lagging the index
+#   is a weaker breakout than the same pattern in a leader.
+#
+#   ADX — reuses the single Wilder implementation in meanrev_scoring (which
+#   regime_allocation also imports), so there is ONE ADX in the codebase, not
+#   a fourth. Threshold matches the regime allocator's 20: below that a
+#   "trend" is drift, and a pullback inside drift is just noise.
+#
+# Deliberately NOT added from the same review: a 10-factor composite score
+# (10 free weights fitted to one regime), sector-relative strength (no sector
+# ETF feed), an earnings-calendar factor (no fundamental pipeline), and
+# top-N-by-score daily selection (that is xsectmom; two ranking desks on one
+# universe is one desk with extra steps).
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# ADAPTIVE EXITS (2026-08-01) — all DEFAULT OFF, and that is deliberate.
+#
+# Exits move this strategy's numbers more than entries do: A_full and
+# A_simple differ ONLY in the 2R half-exit, and that single difference moved
+# Sharpe 0.81 -> 0.71 over 730 days. So exit changes are high-value AND the
+# easiest place to overfit. Each option below is therefore switchable and off
+# until the replay prices it — the deployed configuration should never be one
+# the harness has not measured.
+#
+# Two of the three reuse logic that already exists rather than inventing it:
+#   volatility expansion  = meanrev_scoring's rule (current ATR > k x entry
+#                           ATR), with entry ATR DERIVED from stop distance
+#   ATR trail             = xsection's tiered trail (looser far from entry,
+#                           tighter once a gain is banked)
+#   ADX decay             = new, but reuses the shared Wilder ADX and the
+#                           entry reading swing_v2 now already computes
+# ---------------------------------------------------------------------------
+TRAIL_ATR = float(os.getenv("SWING_V2_TRAIL_ATR", "0"))        # 0 = off
+TRAIL_AFTER_R = float(os.getenv("SWING_V2_TRAIL_AFTER_R", "1.0"))
+VOL_EXIT_MULT = float(os.getenv("SWING_V2_VOL_EXIT", "0"))     # 0 = off
+ADX_DECAY_FRAC = float(os.getenv("SWING_V2_ADX_DECAY", "0"))   # 0 = off
+
+RS_LOOKBACK = int(os.getenv("SWING_V2_RS_LOOKBACK", "63"))
+RS_REQUIRED = os.getenv("SWING_V2_RS", "on").strip().lower() not in (
+    "off", "false", "0", "no")
+ADX_MIN = float(os.getenv("SWING_V2_ADX_MIN", "20"))
+ADX_REQUIRED = os.getenv("SWING_V2_ADX", "on").strip().lower() not in (
+    "off", "false", "0", "no")
+
 PULLBACK_ATR_MULT = 0.5
 VOL_MULT_A = 1.2       # setup-candle volume vs 20d avg (variant A)
 VOL_MULT_B = 1.5       # breakout-day volume vs 20d avg (variant B)
@@ -152,7 +204,40 @@ def fetch_daily_bars(symbols: list[str], limit: int = 120) -> dict[str, list[dic
             if not page:
                 break
             time.sleep(0.25)
-    return {s: b[-limit:] for s, b in out.items()}
+    return {s: _drop_partial_bar(b)[-limit:] for s, b in out.items()}
+
+
+def _drop_partial_bar(bars: list[dict]) -> list[dict]:
+    """Remove today's IN-PROGRESS daily bar (fix 2026-08-01).
+
+    fetch_daily_bars sends no `end`, so Alpaca returns the current session's
+    bar while it is still forming. detect_setup then evaluated `bars[-1]` --
+    a candle that had not finished -- despite documenting "completed daily
+    bars only". Three consequences, all visible in the 2026-07-21 session
+    logs where the funnel read no_bullish_candle=11/setup_volume=6 at midday
+    and 8/9 by the close, then froze after the bell:
+
+      * engulfing / hammer / strong-close were judged on a forming candle,
+        so setups appeared and vanished during the day
+      * cur["v"] was PARTIAL volume, making the 1.2x test far too strict in
+        the morning and progressively looser toward the close
+      * _daily_exits compared against b[-1]["c"], which mid-session is just
+        the live price -- so the EMA20 exit could fire on a "close" that was
+        not one
+
+    After the bell the session bar IS complete, so it is kept: the rule is
+    "drop it only while it is still forming".
+    """
+    if not bars:
+        return bars
+    now = datetime.now(ET)
+    last_day = bars[-1]["t"][:10]
+    if last_day != now.strftime("%Y-%m-%d"):
+        return bars                      # last bar is a prior session
+    closed = (now.hour, now.minute) >= (16, 0)
+    if closed:
+        return bars                      # today's bar has finished
+    return bars[:-1]
 
 
 def latest_prices(symbols: list[str]) -> dict[str, float]:
@@ -229,10 +314,18 @@ class Setup:
     avg_vol20: float
     created: str               # ISO date of setup candle
     age_days: int = 0
+    adx_at_setup: float = 0.0  # for the ADX-decay exit; 0 = unknown
 
 
-def detect_setup(sym: str, bars: list[dict]) -> tuple[Optional[Setup], str]:
-    """Returns (Setup|None, kill_reason). Uses completed daily bars only."""
+def detect_setup(sym: str, bars: list[dict],
+                 bench_closes: Optional[list[float]] = None
+                 ) -> tuple[Optional[Setup], str]:
+    """Returns (Setup|None, kill_reason). Uses completed daily bars only.
+
+    bench_closes: SPY closes, aligned newest-last. When absent the relative
+    strength gate is SKIPPED rather than failing the candidate — a missing
+    benchmark must not silently reject the whole universe.
+    """
     if len(bars) < 60:
         return None, "insufficient_history"
     closes = [b["c"] for b in bars]
@@ -244,6 +337,28 @@ def detect_setup(sym: str, bars: list[dict]) -> tuple[Optional[Setup], str]:
     cur, prev = bars[-1], bars[-2]
     if not (cur["c"] > s50 and e20 > s50):
         return None, "trend_filter"
+    # --- ADX: is this actually a trend, or drift? ---
+    adx_now = None
+    if ADX_REQUIRED or ADX_DECAY_FRAC > 0:
+        try:
+            from meanrev_scoring import adx as _adx
+            adx_now = _adx([b["h"] for b in bars], [b["l"] for b in bars],
+                           [b["c"] for b in bars], 14)
+        except Exception:  # noqa: BLE001 — a missing helper must not reject
+            adx_now = None
+        if ADX_REQUIRED and adx_now is not None and adx_now < ADX_MIN:
+            return None, f"adx_weak({adx_now:.0f}<{ADX_MIN:.0f})"
+    # --- relative strength: is this a leader or a laggard? ---
+    if RS_REQUIRED and bench_closes and len(bench_closes) > RS_LOOKBACK \
+            and len(closes) > RS_LOOKBACK:
+        b0 = bench_closes[-1 - RS_LOOKBACK]
+        c0 = closes[-1 - RS_LOOKBACK]
+        if b0 > 0 and c0 > 0:
+            stock_ret = closes[-1] / c0 - 1
+            bench_ret = bench_closes[-1] / b0 - 1
+            if stock_ret <= bench_ret:
+                return None, (f"rel_strength({stock_ret:+.1%}<="
+                              f"{bench_ret:+.1%})")
     pulled = any(abs(b["l"] - e20) <= PULLBACK_ATR_MULT * a14 or b["l"] < e20
                  for b in bars[-3:])
     if not pulled:
@@ -256,7 +371,8 @@ def detect_setup(sym: str, bars: list[dict]) -> tuple[Optional[Setup], str]:
     if vr < VOL_MULT_A:
         return None, f"setup_volume({vr:.2f}x<{VOL_MULT_A}x)"
     return Setup(sym, cur["h"], cur["l"], a14, swing_low(bars[:-1], 10),
-                 vr, av20, cur["t"][:10]), "ok"
+                 vr, av20, cur["t"][:10],
+                 adx_at_setup=(adx_now or 0.0)), "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +390,9 @@ class Position:
     entry_date: str
     half_taken: bool = False
     bars_held: int = 0
+    high_water: float = 0.0    # highest close since entry, for the trail
+    entry_atr: float = 0.0     # ATR14 at entry, for the volatility exit
+    entry_adx: float = 0.0     # ADX14 at entry, for the decay exit
 
 
 class Book:
@@ -339,7 +458,9 @@ def _enter(variant: str, s: Setup, px: float, equity: float, live: bool):
         log.info("SWING2 FUNNEL %s %s -> killed: size_zero", variant, s.symbol)
         return
     pos = Position(s.symbol, variant, px, stop, px - stop, shares,
-                   datetime.now(ET).strftime("%Y-%m-%d"))
+                   datetime.now(ET).strftime("%Y-%m-%d"),
+                   high_water=px, entry_atr=s.atr14,
+                   entry_adx=s.adx_at_setup)
     BOOK.pos[f"{variant}:{s.symbol}"] = pos
     BOOK.entries_today[variant] = BOOK.entries_today.get(variant, 0) + 1
     log.info("SWING2 SHADOW_ENTRY var=%s %s px=%.2f stop=%.2f shares=%d "
@@ -352,6 +473,15 @@ def _enter(variant: str, s: Setup, px: float, equity: float, live: bool):
 def _exit(key: str, px: float, reason: str, live: bool, fraction: float = 1.0):
     p = BOOK.pos[key]
     n = int(p.shares * fraction)
+    if fraction < 1.0 and n <= 0:
+        # int(1 * 0.5) == 0: the old code sold NOTHING, then set
+        # half_taken=True and moved the stop to breakeven -- flagging profit
+        # that was never taken. With the 10% notional cap, small share counts
+        # are routine on high-priced names (CAT at ~$900 sizes to 8 shares).
+        # Too small to halve: take the whole position at the 2R target.
+        log.info("SWING2 %s: %d share(s) too few to halve — taking the full "
+                 "position at %s", p.symbol, p.shares, reason)
+        n, fraction = p.shares, 1.0
     pnl = (px - p.entry_px) * n
     log.info("SWING2 SHADOW_EXIT var=%s %s px=%.2f shares=%d pnl=%.2f "
              "reason=%s held=%dd", p.variant, p.symbol, px, n, pnl, reason,
@@ -420,7 +550,12 @@ def scan_swing_v2(symbols: list[str], equity: float,
     if time.time() - _last_refresh > REFRESH_SECONDS:
         _last_refresh = time.time()
         try:
-            bars = fetch_daily_bars(symbols)
+            # SPY is fetched alongside the universe as the RS benchmark. It is
+            # never traded here — it exists only to answer "is this name
+            # leading or lagging the index?", the gate meanrev and intraday
+            # already apply and swing_v2 did not.
+            bars = fetch_daily_bars(symbols + (["SPY"] if "SPY" not in symbols
+                                               else []))
         except Exception as e:
             log.error("SWING2 data fetch failed: %s", e)
             if health_record:
@@ -428,13 +563,18 @@ def scan_swing_v2(symbols: list[str], equity: float,
             return
         if health_record:
             health_record("swing_v2_data", True, f"{len(bars)}/{len(symbols)} syms")
+        bench = [b["c"] for b in bars.get("SPY", [])] or None
+        if RS_REQUIRED and not bench:
+            log.warning("SWING2: SPY bars unavailable — relative-strength "
+                        "gate SKIPPED this pass (failing open rather than "
+                        "rejecting the whole universe)")
         kills: dict[str, int] = {}
         new = 0
         for sym in symbols:
             if sym not in bars:
                 kills["no_bars"] = kills.get("no_bars", 0) + 1
                 continue
-            s, why = detect_setup(sym, bars[sym])
+            s, why = detect_setup(sym, bars[sym], bench)
             if s:
                 if sym not in BOOK.setups:
                     new += 1
@@ -474,10 +614,22 @@ def scan_swing_v2(symbols: list[str], equity: float,
             continue
         key = f"A:{sym}"
         if (p > st.setup_high + 0.01 and key not in BOOK.pos
+                and key.replace("A:", "B:") not in BOOK.pos
                 and _concurrent("A") < MAX_CONCURRENT
                 and BOOK.entries_today.get("A", 0) < MAX_NEW_PER_DAY):
-            _enter("A", st, st.setup_high + 0.01, equity, live and
-                   LIVE_VARIANT == "A")
+            # Book the OBSERVED price, not the trigger (fix 2026-08-01).
+            # The breach is only detected AFTER it happens, so a real
+            # stop-buy fills at or above wherever price is now -- never back
+            # at setup_high + 0.01. Recording the trigger understated every
+            # A entry by the gap between the two and biased the A/B
+            # comparison in A's favour, since B books an observed price.
+            fill = max(p, st.setup_high + 0.01)
+            slip = fill - (st.setup_high + 0.01)
+            if slip > 0:
+                log.info("SWING2 A slippage %s: trigger %.2f -> observed "
+                         "%.2f (+%.2f/share)", sym, st.setup_high + 0.01,
+                         fill, slip)
+            _enter("A", st, fill, equity, live and LIVE_VARIANT == "A")
 
     for key in list(BOOK.pos):
         p = BOOK.pos[key]
@@ -499,12 +651,22 @@ def _maybe_variant_b_entry(st: Setup, bars: list[dict], equity: float,
     if key in BOOK.pos or _concurrent("B") >= MAX_CONCURRENT \
             or BOOK.entries_today.get("B", 0) >= MAX_NEW_PER_DAY:
         return
-    last = bars[-1]
-    if last["t"][:10] <= st.created:
+    # Spec: enter at the NEXT OPEN after a completed close above setup_high.
+    # The old code entered at last["c"] -- the breakout bar's own close --
+    # which is both the wrong price and unobtainable in real time (fix
+    # 2026-08-01). Confirmation now needs bars[-2]; the fill is bars[-1]["o"].
+    if len(bars) < 2:
         return
-    if last["c"] > st.setup_high and st.avg_vol20 \
-            and last["v"] >= VOL_MULT_B * st.avg_vol20:
-        _enter("B", st, last["c"], equity, live and LIVE_VARIANT == "B")
+    confirm, entry_bar = bars[-2], bars[-1]
+    if confirm["t"][:10] <= st.created:
+        return
+    if entry_bar["t"][:10] <= confirm["t"][:10]:
+        return
+    if confirm["c"] > st.setup_high and st.avg_vol20 \
+            and confirm["v"] >= VOL_MULT_B * st.avg_vol20:
+        if f"A:{st.symbol}" in BOOK.pos:
+            return                        # variant A already holds this name
+        _enter("B", st, entry_bar["o"], equity, live and LIVE_VARIANT == "B")
 
 
 def _daily_exits(bars: dict[str, list[dict]], live: bool):
@@ -518,9 +680,49 @@ def _daily_exits(bars: dict[str, list[dict]], live: bool):
         e20 = ema([x["c"] for x in b], 20)
         last_close = b[-1]["c"]
         this_live = live and p.variant == LIVE_VARIANT
-        if e20 and last_close < e20 and p.half_taken:
-            _exit(key, last_close, "ema20", this_live)
-        elif e20 and last_close < e20 and p.bars_held >= 2:
+        p.high_water = max(p.high_water or p.entry_px, last_close)
+        atr_now = atr(b, 14)
+
+        # ---- ADAPTIVE TRAILING STOP (off unless SWING_V2_TRAIL_ATR > 0) ---
+        # Ratchets UP only, and only after the trade has banked TRAIL_AFTER_R
+        # of open profit — a trail that engages immediately just converts the
+        # structure stop into a tighter one and stops the trade out in normal
+        # noise before the thesis has had room.
+        if TRAIL_ATR > 0 and atr_now and p.r > 0:
+            if p.high_water >= p.entry_px + TRAIL_AFTER_R * p.r:
+                trailed = p.high_water - TRAIL_ATR * atr_now
+                if trailed > p.stop:
+                    p.stop = trailed
+
+        # ---- exit priority: stop-like reasons first, then structure -------
+        if VOL_EXIT_MULT > 0 and atr_now and p.entry_atr > 0 \
+                and atr_now > VOL_EXIT_MULT * p.entry_atr:
+            # Same rule meanrev's ladder uses: the trade was sized for the
+            # volatility at entry; if realised volatility has expanded far
+            # past that, the environment the setup assumed no longer exists.
+            _exit(key, last_close, f"vol_expansion({atr_now:.2f}>"
+                  f"{VOL_EXIT_MULT:.1f}x{p.entry_atr:.2f})", this_live)
+        elif ADX_DECAY_FRAC > 0 and p.entry_adx > 0:
+            adx_now = None
+            try:
+                from meanrev_scoring import adx as _adx
+                adx_now = _adx([x["h"] for x in b], [x["l"] for x in b],
+                               [x["c"] for x in b], 14)
+            except Exception:  # noqa: BLE001
+                adx_now = None
+            if adx_now is not None \
+                    and adx_now < ADX_DECAY_FRAC * p.entry_adx:
+                _exit(key, last_close, f"adx_decay({adx_now:.0f}<"
+                      f"{ADX_DECAY_FRAC:.2f}x{p.entry_adx:.0f})", this_live)
+            elif e20 and last_close < e20 and (p.half_taken or p.bars_held >= 2):
+                _exit(key, last_close, "ema20", this_live)
+            elif p.bars_held >= TIME_STOP_DAYS \
+                    and last_close < p.entry_px + p.r:
+                _exit(key, last_close, "time", this_live)
+        elif e20 and last_close < e20 and (p.half_taken or p.bars_held >= 2):
+            # Two branches collapsed into one condition (2026-08-01): the
+            # old code had separate half_taken and bars_held>=2 arms that
+            # took identical action.
             _exit(key, last_close, "ema20", this_live)
         elif p.bars_held >= TIME_STOP_DAYS \
                 and last_close < p.entry_px + p.r:
