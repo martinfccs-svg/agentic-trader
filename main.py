@@ -31,7 +31,7 @@ from router import SignalRouter
 from safety import market_is_open, near_close, startup_banner
 from scanner import PriceActionScanner
 from swing_engine import SwingRiskEngine
-from swing_v2 import scan_swing_v2
+from swing_v2 import scan_swing_v2, take_pending_signals
 import regime
 import portfolio_risk
 import regime_allocation
@@ -115,15 +115,17 @@ def build():
         import regime_allocation as _ra
         import loss_cooldown as _lc
         import correlation_manager as _cm
+        import swing_v2 as _sv2
         log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
                     "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
                     "REGIME_FILTER=%s MEANREV_SCORING=%s "
                     "MEANREV_SCORE_MIN=%d REGIME_ALLOC=%s "
                     "SWING_LOSS_COOLDOWN_DAYS=%d CORRELATION_MODE=%s "
-                    "(warn %.2f / block %.2f)",
+                    "(warn %.2f / block %.2f) SWING_V2_ROUTE=%s",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
                     _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
-                    _cm.MODE, _cm.WARN_CORR, _cm.BLOCK_CORR)
+                    _cm.MODE, _cm.WARN_CORR, _cm.BLOCK_CORR,
+                    "ON (swing runs swing_v2)" if _sv2.ROUTE_LIVE else "off")
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
@@ -142,7 +144,27 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
 
     # Scan only the enabled strategies. Skipping scan_intraday() is what
     # removes the 12-name 1-minute data cost while intraday is benched.
-    swing_sigs = scanner.scan_swing() if swing else []
+    # When SWING_V2_ROUTE=on, swing_v2 OWNS the swing desk: its scanner
+    # produces the entries and old swing's breakout scan is switched off.
+    # Running both would put two strategies into one set of position slots
+    # and make the results unattributable (2026-08-01).
+    _v2_route = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
+        "on", "true", "1", "yes")
+    swing_sigs = ([] if (_v2_route or not swing) else scanner.scan_swing())
+    if _v2_route and swing:
+        # Scan and drain BEFORE the routing block below. An earlier wiring
+        # ran the v2 scan further down, after routing — so every signal it
+        # produced was silently discarded. Contained: a v2 failure must never
+        # cost a cycle.
+        try:
+            scan_swing_v2(UNIVERSE, equity=broker.equity)
+            _v2_sigs = take_pending_signals()
+            if _v2_sigs:
+                log.warning("swing_v2 -> engine: %d signal(s) routed",
+                            len(_v2_sigs))
+                swing_sigs.extend(_v2_sigs)
+        except Exception as e:  # noqa: BLE001
+            log.error("swing_v2 routed scan failed (non-fatal): %s", e)
     meanrev_sigs = scanner.scan_meanrev() if meanrev else []
     intraday_sigs = scanner.scan_intraday() \
         if (intraday and is_open and not near_close()) else []
@@ -193,10 +215,11 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # swing_v2.py). Contained: a v2 failure must never cost a real cycle.
     # Data budget note: v2 fetches its own daily bars from Alpaca's data API
     # (free with the existing broker keys) — zero Finnhub budget impact.
-    try:
-        scan_swing_v2(UNIVERSE, equity=broker.equity)
-    except Exception as e:  # noqa: BLE001
-        log.error("swing_v2 shadow scan failed (non-fatal): %s", e)
+    if not _v2_route:
+        try:
+            scan_swing_v2(UNIVERSE, equity=broker.equity)
+        except Exception as e:  # noqa: BLE001
+            log.error("swing_v2 shadow scan failed (non-fatal): %s", e)
 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
