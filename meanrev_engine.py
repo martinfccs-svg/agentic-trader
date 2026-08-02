@@ -17,6 +17,7 @@ from indicators import rsi
 import meanrev_scoring as mrs
 import portfolio_risk
 import regime_allocation
+import portfolio_manager
 import correlation_manager
 from models import Action, Signal, System
 from risk import position_size
@@ -97,15 +98,17 @@ class MeanReversionEngine:
         shares = position_size(self._broker.equity, q.price, stop,
                                getattr(self._broker, "cash", 1e12))
         # Regime allocation (2026-07-24): shares only; 1.0 unless live.
-        shares, _alloc = regime_allocation.apply_to_shares(
-            shares, self._feed, "meanrev", self._broker.equity, q.price)
-        # Portfolio correlation (2026-07-29): shared service, same rule for
-        # every desk. Measure-only until CORRELATION_MAX is set.
-        shares, _corr = correlation_manager.apply(
-            shares, self._feed, self._broker, signal.ticker, System.MEANREV)
+        # ONE decision point (2026-08-02). Heat, sector budget, correlation,
+        # regime and the final notional clamp are evaluated together by
+        # portfolio_manager and logged as a single auditable line. These used
+        # to be separate calls in each engine — seven call sites across four
+        # files, which is precisely how a multiplier gets applied twice.
+        shares, _pdec = portfolio_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.MEANREV,
+            q.price, stop, self._broker.equity)
         if shares <= 0:
             self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK,
-                             "correlation with existing holdings")
+                             f"portfolio manager: {_pdec}")
             return
         if _alloc != 1.0:
             log.info("meanrev regime sizing %s: x%.2f -> shares=%.2f",
