@@ -20,6 +20,35 @@ from safety import market_is_open
 
 log = logging.getLogger("swing")
 
+# True when swing is running swing_v2's strategy end to end. Read from the
+# same env var swing_v2 uses, so entries and exits can never disagree about
+# which strategy the desk is running.
+_V2_ROUTE = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
+    "on", "true", "1", "yes")
+_V2_TIME_STOP = int(os.getenv("SWING_V2_TIME_STOP_DAYS", "15"))
+
+
+def _ema(values, n):
+    if len(values) < n:
+        return None
+    k = 2.0 / (n + 1)
+    e = sum(values[:n]) / n
+    for v in values[n:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def _trading_days_since(entry_epoch: float) -> int:
+    from datetime import date, datetime, timezone
+    a = datetime.fromtimestamp(entry_epoch, tz=timezone.utc).date()
+    b = datetime.now(timezone.utc).date()
+    days, cur = 0, a
+    while cur < b:
+        cur = date.fromordinal(cur.toordinal() + 1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
+
 # ---------------------------------------------------------------------------
 # ENTRY BENCH (2026-07-20 operator decision: "swing has been bleeding").
 # SWING_ENTRIES=false suppresses NEW entries only, at the last possible
@@ -164,10 +193,52 @@ class SwingRiskEngine:
             if q is None:
                 continue
             self._broker.mark(ticker, q.price)
-            if q.atr is not None:
+
+            # ---- EXIT REGIME (2026-08-01) --------------------------------
+            # With SWING_V2_ROUTE=on the desk runs swing_v2's strategy, and
+            # its exits are part of what the backtest measured: hold while
+            # price stays above the 20-EMA, plus a time stop if the trade has
+            # not reached +1R. Grafting v2 entries onto old swing's 2.5xATR
+            # trail would deploy a combination that was never tested.
+            # The structure stop set at entry stays as the hard floor and is
+            # never widened.
+            v2_exits = _V2_ROUTE
+            if not v2_exits and q.atr is not None:
                 pos.stop_price = max(
                     pos.stop_price,
                     pos.high_water - SWING.atr_stop_multiple * q.atr)
+            elif v2_exits:
+                bars = self._feed.get_daily_bars(ticker)
+                closes = bars.close if bars else []
+                e20 = _ema(closes, 20) if len(closes) >= 20 else None
+                held = _trading_days_since(pos.entry_time)
+                r = (pos.entry_price - (pos.entry_stop or pos.stop_price))
+                why = None
+                if e20 and closes and closes[-1] < e20 and held >= 2:
+                    why = f"ema20(close {closes[-1]:.2f} < {e20:.2f})"
+                elif held >= _V2_TIME_STOP and r > 0 \
+                        and q.price < pos.entry_price + r:
+                    why = f"time({held}d without +1R)"
+                if why and market_is_open():
+                    try:
+                        entry_price, shares = pos.entry_price, pos.shares
+                        realized = self._broker.sell(ticker, q.price)
+                        self._log.record_close(System.SWING, realized)
+                        if realized is not None and realized < 0:
+                            loss_cooldown.note_loss("swing", ticker)
+                        log.warning("swing v2-exit %s: %s realized=%s",
+                                    ticker, why,
+                                    f"{realized:+.2f}" if realized is not None
+                                    else "n/a")
+                        if realized is not None:
+                            self._notifier.notify_exit(
+                                ticker=ticker, shares=shares,
+                                exit_price=q.price, entry_price=entry_price,
+                                pnl=realized, system=System.SWING.value)
+                    except Exception as e:  # noqa: BLE001
+                        log.error("swing v2-exit %s failed (retry next "
+                                  "cycle): %s", ticker, e)
+                    continue
             # Local stop is a BACKUP to the broker-side GTC leg, which is
             # live 24/7. Firing it while the market is CLOSED just sells at a
             # stale quote — on 2026-07-16 that dumped UNH/INTC/MU at
