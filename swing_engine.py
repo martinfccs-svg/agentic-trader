@@ -14,6 +14,7 @@ from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
 from models import Action, Signal, System
 from risk import position_size
 import regime_allocation
+import portfolio_manager
 import loss_cooldown
 import correlation_manager
 from safety import market_is_open
@@ -180,17 +181,17 @@ class SwingRiskEngine:
                 log.error("swing per-desk risk failed (%s) — using the "
                           "engine's own size", e)
 
-        shares, _alloc = regime_allocation.apply_to_shares(
-            shares, self._feed, "swing", self._broker.equity, q.price)
-        # Portfolio correlation (2026-07-29): the portfolio question, not the
-        # trade question. Swing could hold RTX and LMT at once — two defence
-        # names, one bet — and nothing noticed. Measure-only until
-        # CORRELATION_MAX is set.
-        shares, _corr = correlation_manager.apply(
-            shares, self._feed, self._broker, signal.ticker, System.SWING)
+        # ONE decision point (2026-08-02). Heat, sector budget, correlation,
+        # regime and the final notional clamp are evaluated together by
+        # portfolio_manager and logged as a single auditable line. These used
+        # to be separate calls in each engine — seven call sites across four
+        # files, which is precisely how a multiplier gets applied twice.
+        shares, _pdec = portfolio_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.SWING,
+            q.price, stop, self._broker.equity)
         if shares <= 0:
             self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK,
-                             "correlation with existing holdings")
+                             f"portfolio manager: {_pdec}")
             return
         if _alloc != 1.0:
             log.info("swing regime sizing %s: x%.2f -> shares=%.2f",
