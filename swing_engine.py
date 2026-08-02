@@ -27,6 +27,32 @@ _V2_ROUTE = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
     "on", "true", "1", "yes")
 _V2_TIME_STOP = int(os.getenv("SWING_V2_TIME_STOP_DAYS", "15"))
 
+# PER-DESK RISK (2026-08-01). The engine sizes every desk at
+# RISK_PER_TRADE_PCT (1%), but swing_v2 was written AND BACKTESTED at 0.75%
+# — so routing it through the engine unchanged would deploy positions ~33%
+# larger than the ones that were measured. Sharpe is scale-invariant, but
+# max drawdown is not: the tested -6.6% would become roughly -8.8%, eroding
+# the one advantage this strategy robustly has.
+#
+# RISK_PER_TRADE_PCT is global, so lowering it would shrink meanrev,
+# intraday and xsect too. This scales SWING's share count only, leaving the
+# other desks alone. Default: match the backtest when routing v2, otherwise
+# leave the engine's own figure untouched.
+def _swing_risk_pct() -> float:
+    env = os.getenv("SWING_RISK_PCT")
+    if env:
+        return float(env)
+    if _V2_ROUTE:
+        return float(os.getenv("SWING_V2_RISK_PCT", "0.0075"))
+    return _ENGINE_RISK
+
+
+try:
+    from config import RISK_PER_TRADE_PCT as _ENGINE_RISK
+except Exception:  # noqa: BLE001
+    _ENGINE_RISK = 0.01
+_SWING_RISK = None      # resolved lazily so tests can re-read the env
+
 
 def _ema(values, n):
     if len(values) < n:
@@ -127,6 +153,33 @@ class SwingRiskEngine:
         # to position_size — scaling equity would also scale the 10%-notional
         # cap, loosening a risk limit as a side effect of a sizing decision.
         # Returns 1.0 unless REGIME_ALLOC=live.
+        # Per-desk risk: RECOMPUTED, not scaled. Scaling the number
+        # position_size returned is wrong whenever the notional cap binds —
+        # and with a 10% cap on liquid names it binds often. Worked example
+        # (RTX, equity 95k, risk/share 14.41): the correct 0.75% size is
+        # min(49.4 risk-shares, 43.45 cap-shares) = 43.45, while scaling the
+        # capped 1% figure gives 43.45 x 0.75 = 32.59 — a 25% under-size that
+        # would NOT match the backtest, which applies risk% and the cap in
+        # this same order.
+        _risk = _swing_risk_pct()
+        if abs(_risk - _ENGINE_RISK) > 1e-12:
+            try:
+                from config import max_position_dollars
+                _dist = q.price - stop
+                if _dist > 0:
+                    _cash = getattr(self._broker, "cash", 1e12)
+                    _before = shares
+                    shares = min(self._broker.equity * _risk / _dist,
+                                 max_position_dollars(self._broker.equity)
+                                 / q.price,
+                                 _cash / q.price)
+                    log.info("swing risk %.4f (engine default %.4f): "
+                             "%.2f -> %.2f shares", _risk, _ENGINE_RISK,
+                             _before, shares)
+            except Exception as e:  # noqa: BLE001 — never break sizing
+                log.error("swing per-desk risk failed (%s) — using the "
+                          "engine's own size", e)
+
         shares, _alloc = regime_allocation.apply_to_shares(
             shares, self._feed, "swing", self._broker.equity, q.price)
         # Portfolio correlation (2026-07-29): the portfolio question, not the
