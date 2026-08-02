@@ -45,6 +45,7 @@ from safety import market_is_open
 from scan_health import DailyRebalanceGate
 import regime
 import regime_allocation
+import portfolio_manager
 from sector_map import sector_of
 import xsect_persistence as xp
 
@@ -383,8 +384,17 @@ class CrossSectionalMomentumEngine:
             # REGIME_ALLOC=live. Wired here because the STRONG_BULL table
             # leans hardest on xsectmom — leaving it unwired would have made
             # that number decorative.
-            shares, _alloc = regime_allocation.apply_to_shares(
-                shares, self._feed, "xsectmom", self._broker.equity, q.price)
+            # ONE decision point (2026-08-02). NOTE: correlation stays a
+            # no-op for this desk by design — its sector cap already does that
+            # job, and stacking two diversification filters on three slots
+            # risks starving the rotation.
+            shares, _pdec = portfolio_manager.apply(
+                shares, self._feed, self._broker, ticker, System.XSECTMOM,
+                q.price, stop, self._broker.equity)
+            if shares <= 0:
+                log.warning("xsect rebalance: skip %s — portfolio manager "
+                            "returned %s", ticker, _pdec)
+                continue
             if _alloc != 1.0:
                 log.info("xsect regime sizing %s: x%.2f -> shares=%.2f",
                          ticker, _alloc, shares)
