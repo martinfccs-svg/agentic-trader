@@ -13,6 +13,7 @@ import os
 import audit
 import intraday_scoring as ids
 import regime_allocation
+import portfolio_manager
 import correlation_manager
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import atr, avg_dollar_volume
@@ -123,16 +124,17 @@ class IntradayRiskEngine:
         stop = q.price - INTRADAY.atr_stop_multiple * intra_atr
         shares = position_size(self._broker.equity, q.price, stop, getattr(self._broker, "cash", 1e12))
         # Regime allocation (2026-07-24): shares only; 1.0 unless live.
-        shares, _alloc = regime_allocation.apply_to_shares(
-            shares, self._feed, "intraday", self._broker.equity, q.price)
-        # Portfolio correlation (2026-07-29): shared service, same rule for
-        # every desk. Measure-only until CORRELATION_MAX is set.
-        shares, _corr = correlation_manager.apply(
-            shares, self._feed, self._broker, signal.ticker, System.INTRADAY)
+        # ONE decision point (2026-08-02). Heat, sector budget, correlation,
+        # regime and the final notional clamp are evaluated together by
+        # portfolio_manager and logged as a single auditable line. These used
+        # to be separate calls in each engine — seven call sites across four
+        # files, which is precisely how a multiplier gets applied twice.
+        shares, _pdec = portfolio_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.INTRADAY,
+            q.price, stop, self._broker.equity)
         if shares <= 0:
-            _log_reject(signal.ticker, "correlation with existing holdings")
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
-                             "correlation with existing holdings")
+                             f"portfolio manager: {_pdec}")
             return
         if _alloc != 1.0:
             log.info("intraday regime sizing %s: x%.2f -> shares=%.2f",
