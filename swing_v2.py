@@ -457,6 +457,31 @@ def _enter(variant: str, s: Setup, px: float, equity: float, live: bool):
     if shares <= 0:
         log.info("SWING2 FUNNEL %s %s -> killed: size_zero", variant, s.symbol)
         return
+    if ROUTE_LIVE and variant == LIVE_VARIANT:
+        # Hand the trade to the engine. Sizing, gates, brackets, reconcile and
+        # every portfolio overlay are the engine's job — swing_v2's own
+        # `shares` figure is deliberately discarded here so there is exactly
+        # one sizing authority.
+        try:
+            from models import Signal, SignalSource
+            _pending.append(Signal(
+                SignalSource.TREND, s.symbol,
+                reason=(f"swing_v2 {variant}: pullback+candle, "
+                        f"stop={stop:.2f}"),
+                raw={"stop": stop, "variant": variant,
+                     "atr14": s.atr14, "adx": s.adx_at_setup,
+                     "source": "swing_v2"}))
+            BOOK.entries_today[variant] = BOOK.entries_today.get(variant, 0) + 1
+            log.warning("SWING2 ROUTED var=%s %s px=%.2f stop=%.2f -> "
+                        "swing engine (engine sizes and executes)",
+                        variant, s.symbol, px, stop)
+            _audit_mirror("swing2_routed", variant=variant, ticker=s.symbol,
+                          px=round(px, 2), stop=round(stop, 2))
+        except Exception as e:  # noqa: BLE001 — never break the scan
+            log.error("SWING2 route failed for %s (%s) — no order placed",
+                      s.symbol, e)
+        return
+
     pos = Position(s.symbol, variant, px, stop, px - stop, shares,
                    datetime.now(ET).strftime("%Y-%m-%d"),
                    high_water=px, entry_atr=s.atr14,
@@ -510,6 +535,31 @@ def _audit_mirror(event: str, **fields) -> None:
 
 
 _live_refused_logged = False
+
+
+# ---------------------------------------------------------------------------
+# LIVE PORT (2026-08-01). swing_v2 still refuses to place its OWN orders —
+# that refusal is correct and stays. What changes: when SWING_V2_ROUTE=on it
+# EMITS Signal objects instead of shadow-booking them, and swing_engine
+# executes. The engine already owns bracket orders, boot reconcile, the bench
+# gate, the loss cooldown, the regime multiplier and the correlation check;
+# routing through it means swing_v2 inherits all of that rather than
+# reimplementing any of it.
+#
+# The signal carries the STRUCTURE STOP in signal.raw. Without it the engine
+# would size on its own 2.5xATR stop, which is not what the backtest measured
+# — the structure stop IS part of the strategy, not an execution detail.
+# ---------------------------------------------------------------------------
+ROUTE_LIVE = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
+    "on", "true", "1", "yes")
+_pending: list = []          # Signals produced this cycle, drained by main
+
+
+def take_pending_signals() -> list:
+    """Drain and return Signals for the router. Empty unless ROUTE_LIVE."""
+    global _pending
+    out, _pending = _pending, []
+    return out
 
 
 def _refuse_live_mode() -> bool:
