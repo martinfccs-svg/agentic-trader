@@ -12,7 +12,6 @@ import os
 
 import audit
 import intraday_scoring as ids
-import regime_allocation
 import portfolio_manager
 import exit_exec
 import exit_rules
@@ -138,9 +137,6 @@ class IntradayRiskEngine:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
                              f"portfolio manager: {_pdec}")
             return
-        if _alloc != 1.0:
-            log.info("intraday regime sizing %s: x%.2f -> shares=%.2f",
-                     signal.ticker, _alloc, shares)
         if shares <= 0:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "size=0")
             return
