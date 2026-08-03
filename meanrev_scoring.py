@@ -46,6 +46,7 @@ from typing import Optional
 # here so `from meanrev_scoring import adx` keeps working for
 # regime_allocation, swing_v2 and the backtests.
 from indicators import ema, adx  # noqa: F401
+import exit_rules
 
 SCORING_MODE = os.getenv("MEANREV_SCORING", "shadow").strip().lower()
 
@@ -193,13 +194,20 @@ def ladder_decision(price: float, entry: float, entry_stop: float,
         breakeven hit = implied by the ratchet below
         entry ATR     = initial risk / atr_stop_multiple
     """
+    # Arithmetic from exit_rules (2026-08-02); the LADDER ORDER below is this
+    # desk's policy and stays here. Note the time stop further down uses
+    # stale_thesis_stop, NOT time_stop: a mean-reversion trade that has not
+    # reverted is stale whether or not it is green, and exit_rules.time_stop
+    # would refuse to exit a winner.
     r = entry - entry_stop
     new_stop = stop
     if r > 0 and price >= entry + r:                       # L1: >= +1R
         new_stop = max(new_stop, entry)                    # breakeven
         if atr14 is not None:                              # L2: ATR trail
-            new_stop = max(new_stop, high_water - TRAIL_ATR_MULT * atr14)
-    if price <= new_stop:
+            new_stop = exit_rules.ratchet_stop(
+                new_stop, high_water, atr14, TRAIL_ATR_MULT)
+    hit = exit_rules.stop_hit(price, new_stop)
+    if hit:
         return new_stop, "stop"
     # L2b: emergency volatility exit — the trade was sized for entry-ATR; if
     # current ATR has expanded past VOL_EXIT_MULT x that, the regime the
@@ -212,8 +220,9 @@ def ladder_decision(price: float, entry: float, entry_stop: float,
                               f"{VOL_EXIT_MULT:.1f}x entry {entry_atr:.2f})")
     if rsi_value is not None and rsi_value >= rsi_exit:    # L5: final exit
         return new_stop, f"rsi_reverted({rsi_value:.1f}>={rsi_exit:.0f})"
-    if ema200 is not None and last_close < ema200:         # L4: trend rev.
+    if exit_rules.trend_exit(last_close, ema200):          # L4: trend rev.
         return new_stop, "trend_reversal(close<EMA200)"
-    if time_stop_days and held_days >= time_stop_days:     # L3: time
-        return new_stop, f"time({held_days}d)"
+    stale = exit_rules.stale_thesis_stop(held_days, time_stop_days or 0)
+    if stale:                                              # L3: time
+        return new_stop, stale
     return new_stop, None
