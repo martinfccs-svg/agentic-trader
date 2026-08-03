@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
+from indicators import ema  # canonical (2026-08-02)
 
 ET = ZoneInfo("America/New_York")
 
@@ -89,16 +90,6 @@ def resample(closes: list[float], highs: list[float], lows: list[float],
         l.append(min(lows[i:j]))
         v.append(sum(volumes[i:j]))
     return c, h, l, v
-
-
-def ema(values: list[float], n: int) -> Optional[float]:
-    if len(values) < n:
-        return None
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    for x in values[n:]:
-        e = x * k + e * (1 - k)
-    return e
 
 
 def _aligned(closes: list[float]) -> Optional[bool]:
