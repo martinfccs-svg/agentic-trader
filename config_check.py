@@ -36,6 +36,12 @@ log = logging.getLogger("config_check")
 KNOWN = {
     "ABSENT_CONFIRM_SECS", "AFTER_HOURS_INTERVAL_SECS", "ALPACA_API_KEY",
     "ALPACA_PAPER", "ALPACA_SECRET_KEY", "APCA_API_BASE_URL",
+    "BEARTREND_ADX_MIN", "BEARTREND_APPROVAL_VALID_DAYS",
+    "BEARTREND_BREAKDOWN_DAYS", "BEARTREND_EMA_SLOPE_DAYS",
+    "BEARTREND_LOG_SCORE_MIN", "BEARTREND_MODE", "BEARTREND_OBS_PATH",
+    "BEARTREND_REFRESH_SECONDS", "BEARTREND_RESEARCH_DIR",
+    "BEARTREND_RS_LOOKBACK", "BEARTREND_RSI_FLOOR", "BEARTREND_ATR_STOP",
+    "BEARTREND_VERSION", "BEARTREND_VOL_MULT",
     "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "BROKER",
     "COMMISSION_PER_TRADE", "CONCENTRATION_TOP_N", "CONCENTRATION_TOP_N_MAX",
     "CORRELATION_BLOCK", "CORRELATION_LOOKBACK", "CORRELATION_MIN_OBS",
@@ -137,6 +143,7 @@ RANGES = {
 }
 
 ENUMS = {
+    "BEARTREND_MODE": {"off", "shadow"},
     "CORRELATION_MODE": {"measure", "enforce"},
     "MEANREV_SCORING": {"off", "shadow", "live"},
     "REGIME_ALLOC": {"off", "shadow", "live"},
@@ -234,6 +241,12 @@ def validate() -> tuple[int, int]:
         errors.append(f"CORRELATION_WARN={warn_c} > CORRELATION_BLOCK="
                       f"{block_c} — reduce would trigger above reject, so "
                       f"REDUCE can never fire.")
+
+    if os.getenv("BEARTREND_MODE", "").strip().lower() not in \
+            ("", "off", "shadow"):
+        errors.append("BEARTREND_MODE only supports 'off' and 'shadow' — the "
+                      "module RAISES on anything else at import, so the bot "
+                      "will not boot. There is no short execution path.")
 
     if (os.getenv("SWING_V2_MODE", "").strip().lower() == "live"):
         warns.append("SWING_V2_MODE=live is REFUSED in code (v2 orders would "
