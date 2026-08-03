@@ -89,7 +89,7 @@ class IntradayRiskEngine:
         if self._open() >= INTRADAY.max_positions or signal.ticker in self._broker.positions:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK)
             _log_reject(signal.ticker,
-                        f"max_positions ({self._open()}/"
+                        f"max_positions ({self._open()}/"\
                         f"{INTRADAY.max_positions}) or already held")
             return
         q = self._feed.get_quote(signal.ticker)
@@ -138,6 +138,10 @@ class IntradayRiskEngine:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
                              f"portfolio manager: {_pdec}")
             return
+        # Log regime allocation multiplier if it differs from baseline (1.0)
+        before_regime = shares
+        shares, _alloc = regime_allocation.apply_to_shares(
+            shares, self._feed, "intraday", self._broker.equity, q.price)
         if _alloc != 1.0:
             log.info("intraday regime sizing %s: x%.2f -> shares=%.2f",
                      signal.ticker, _alloc, shares)
@@ -177,8 +181,8 @@ class IntradayRiskEngine:
             # profitable"). Nothing in this system predicts profitability.
             # It is the trading-WINDOW gate — the clock. Renamed to remove
             # the ambiguity, same class of fix as leg_or_manual -> bracket_leg.
-            card_str = (" | v2: score=%.2f gates[time=%s mkt=%s rv=%s "
-                        "vol=%s] v2_stop=%s (v6_stop=%.2f)"
+            card_str = (" | v2: score=%.2f gates[time=%s mkt=%s rv=%s "\
+                        "vol=%s] v2_stop=%s (v6_stop=%.2f)"\
                         % (card.score, card.gate_window, card.gate_market,
                            card.gate_rv, card.gate_volband,
                            card.v2_stop, stop))
@@ -187,13 +191,13 @@ class IntradayRiskEngine:
                 and not card.qualifies():
             self._log.record(signal, System.INTRADAY,
                              Action.REJECTED_BY_CONFIRMATION,
-                             f"v2 gate: score={card.score:.2f} "
+                             f"v2 gate: score={card.score:.2f} "\
                              f"gates_ok={card.gates_ok}")
             _log_reject(signal.ticker,
-                        "v2 gate score=%.2f (min %.2f) gates[time=%s "
-                        "mkt=%s rv=%s vol=%s] (time=trading window "
-                        "9:35-11:15 / 13:30-15:30 ET; mkt=SPY above VWAP "
-                        "and EMA50; rv=relative volume; vol=ATR%% band)"
+                        "v2 gate score=%.2f (min %.2f) gates[time=%s "\
+                        "mkt=%s rv=%s vol=%s] (time=trading window "\
+                        "9:35-11:15 / 13:30-15:30 ET; mkt=SPY above VWAP "\
+                        "and EMA50; rv=relative volume; vol=ATR%% band)"\
                         % (card.score, ids.SCORE_MIN,
                                            card.gate_window, card.gate_market,
                                            card.gate_rv, card.gate_volband))
@@ -210,7 +214,7 @@ class IntradayRiskEngine:
             stop = card.v2_stop
             shares = position_size(self._broker.equity, q.price, stop,
                                    getattr(self._broker, "cash", 1e12))
-            tier = (1.0 if card.score >= 0.85
+            tier = (1.0 if card.score >= 0.85\
                     else 0.75 if card.score >= 0.75 else 0.5)
             shares = shares * tier
             if shares <= 0:
@@ -218,7 +222,7 @@ class IntradayRiskEngine:
                                  Action.REJECTED_BY_RISK,
                                  "size=0 (v2 stop/tier)")
                 return
-            log.info("intraday v2-live sizing %s: stop=%.2f (structure) "
+            log.info("intraday v2-live sizing %s: stop=%.2f (structure) "\
                      "tier=%.2f shares=%.2f score=%.2f", signal.ticker,
                      stop, tier, shares, card.score)
 
@@ -226,8 +230,8 @@ class IntradayRiskEngine:
             # Full dry-run complete; withhold only the order. Mirrored to the
             # persistent audit trail (Railway purges logs) — these lines ARE
             # the re-activation evidence.
-            log.warning("INTRADAY SHADOW would_trade %s x%.2f @ %.2f "
-                        "stop=%.2f (%s)%s — entries gated via "
+            log.warning("INTRADAY SHADOW would_trade %s x%.2f @ %.2f "\
+                        "stop=%.2f (%s)%s — entries gated via "\
                         "INTRADAY_ENTRIES=false", signal.ticker, shares,
                         q.price, stop, signal.reason, card_str)
             audit.record("intraday_shadow_signal", notify=False,
@@ -237,8 +241,8 @@ class IntradayRiskEngine:
                          v2_score=(card.score if card else None),
                          v2_gates_ok=(card.gates_ok if card else None),
                          v2_stop=(card.v2_stop if card else None),
-                         v2_parts=({k: round(v, 3)
-                                    for k, v in card.parts.items()}
+                         v2_parts=({k: round(v, 3)\
+                                    for k, v in card.parts.items()}\
                                    if card else None))
             return
         pos = self._broker.buy(signal.ticker, shares, q.price, System.INTRADAY,
@@ -303,7 +307,7 @@ class IntradayRiskEngine:
           - failures keep their position in the tracker and retry next cycle
           - runs at most once while flat (no 5-second flatten spam)
         """
-        tickers = [t for t, p in self._broker.positions.items()
+        tickers = [t for t, p in self._broker.positions.items()\
                    if p.system is System.INTRADAY]
         if not tickers:
             if not self._flattened_latch:
@@ -329,7 +333,7 @@ class IntradayRiskEngine:
             # Do NOT latch and do NOT claim success — positions remain in the
             # tracker for retry. The old unconditional "flatten complete" log
             # masked exactly this state.
-            log.error("INTRADAY flatten INCOMPLETE (%s): failed=%s — "
+            log.error("INTRADAY flatten INCOMPLETE (%s): failed=%s — "\
                       "will retry next cycle", reason, failed)
             audit.flatten(reason=reason, closed=len(tickers) - len(failed),
                           failed=failed)
@@ -337,3 +341,4 @@ class IntradayRiskEngine:
             self._flattened_latch = True
             log.info("INTRADAY flatten complete (%s)", reason)
             audit.flatten(reason=reason, closed=len(tickers), failed=[])
+
