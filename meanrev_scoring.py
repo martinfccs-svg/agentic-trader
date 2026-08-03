@@ -42,6 +42,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Optional
+# ema and adx are CANONICAL in indicators.py (2026-08-02). Re-exported
+# here so `from meanrev_scoring import adx` keeps working for
+# regime_allocation, swing_v2 and the backtests.
+from indicators import ema, adx  # noqa: F401
 
 SCORING_MODE = os.getenv("MEANREV_SCORING", "shadow").strip().lower()
 
@@ -78,16 +82,6 @@ VOL_EXIT_MULT = float(os.getenv("MEANREV_VOL_EXIT_MULT", "1.8"))
 
 
 # ------------------------------------------------------------- indicators
-def ema(values: list[float], n: int) -> Optional[float]:
-    if len(values) < n:
-        return None
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    for v in values[n:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
 def bollinger_lower(values: list[float], n: int = BB_PERIOD,
                     k: float = BB_K) -> Optional[float]:
     if len(values) < n:
@@ -106,40 +100,6 @@ def _atr_window(high, low, close, n) -> Optional[float]:
         trs.append(max(high[i] - low[i], abs(high[i] - close[i - 1]),
                        abs(low[i] - close[i - 1])))
     return sum(trs) / n
-
-
-def adx(high: list[float], low: list[float], close: list[float],
-        n: int = ADX_PERIOD) -> Optional[float]:
-    """Wilder's ADX. Needs ~2n+1 bars for a stable value."""
-    if len(close) < 2 * n + 1:
-        return None
-    plus_dm, minus_dm, trs = [], [], []
-    for i in range(1, len(close)):
-        up, down = high[i] - high[i - 1], low[i - 1] - low[i]
-        plus_dm.append(up if (up > down and up > 0) else 0.0)
-        minus_dm.append(down if (down > up and down > 0) else 0.0)
-        trs.append(max(high[i] - low[i], abs(high[i] - close[i - 1]),
-                       abs(low[i] - close[i - 1])))
-    # Wilder smoothing
-    atr_s = sum(trs[:n]); pdm_s = sum(plus_dm[:n]); mdm_s = sum(minus_dm[:n])
-    dxs = []
-    for i in range(n, len(trs)):
-        atr_s = atr_s - atr_s / n + trs[i]
-        pdm_s = pdm_s - pdm_s / n + plus_dm[i]
-        mdm_s = mdm_s - mdm_s / n + minus_dm[i]
-        if atr_s <= 0:
-            continue
-        pdi = 100 * pdm_s / atr_s
-        mdi = 100 * mdm_s / atr_s
-        if pdi + mdi == 0:
-            continue
-        dxs.append(100 * abs(pdi - mdi) / (pdi + mdi))
-    if len(dxs) < n:
-        return None
-    a = sum(dxs[:n]) / n
-    for d in dxs[n:]:
-        a = (a * (n - 1) + d) / n
-    return a
 
 
 # --------------------------------------------------------------- scoring
