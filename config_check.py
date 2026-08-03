@@ -83,6 +83,18 @@ KNOWN = {
 # The name you would naturally reach for -> the name the code actually reads.
 # Setting the left-hand one does NOTHING, silently. Every entry here is a
 # real trap someone has hit or would hit.
+# Confirmed dead on the 2026-08-03 boot — set in Railway, read by nothing.
+# Kept as explicit entries so the message names the replacement instead of
+# guessing, and so removing them from Railway is an informed decision.
+DEAD = {
+    "TAKE_PROFIT_PCT": "TAKE_PROFIT_R (the code works in R multiples, not %)",
+    "MAX_CONCURRENT_POSITIONS": "per-desk caps: SWING_MAX_POS, "
+                                "INTRADAY_MAX_POS, MR_MAX_POS, XS_TOP_N",
+    "MEANREV_USE_TAKE_PROFIT": "removed when the exit ladder replaced the "
+                               "fixed take-profit (2026-07-23)",
+    "XS_REBAL_CYCLES": "removed when rotation moved to a daily 10:00 gate",
+}
+
 ALIASES = {
     "MEANREV_MAX_POS": "MR_MAX_POS",
     "MEANREV_ATR_MULT": "MR_ATR_MULT",
@@ -159,7 +171,10 @@ def validate() -> tuple[int, int]:
 
     # ---- typos and dead config ----------------------------------------
     for k in sorted(os.environ):
-        if k in ALIASES:
+        if k in DEAD:
+            errors.append(f"{k} is set but nothing reads it — {DEAD[k]}. "
+                          f"Remove it from Railway.")
+        elif k in ALIASES:
             errors.append(f"{k} is set but the code reads {ALIASES[k]} — "
                           f"this setting does NOTHING. Rename it.")
         elif k not in KNOWN:
