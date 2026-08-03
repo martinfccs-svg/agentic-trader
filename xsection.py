@@ -46,6 +46,7 @@ from scan_health import DailyRebalanceGate
 import regime
 import regime_allocation
 import portfolio_manager
+import exit_rules
 from sector_map import sector_of
 import xsect_persistence as xp
 from indicators import ema as _ema  # canonical (2026-08-02)
@@ -447,25 +448,28 @@ class CrossSectionalMomentumEngine:
             # it protects catastrophe without forcing a sale the ranking did
             # not ask for. Ratchets UP only; never widens.
             if TRAIL_ENABLED and q.atr and pos.stop_price and pos.entry_price:
+                # Arithmetic from exit_rules (2026-08-02); the LADDER — which
+                # gains map to which ATR multiples — stays here, because that
+                # is this desk's policy. Verified numerically identical to the
+                # inline version it replaces.
                 pos.high_water = max(pos.high_water or pos.entry_price,
                                      q.price)
-                gain = (pos.high_water / pos.entry_price) - 1.0
-                mult = None
-                if gain >= TRAIL_TIER2_GAIN:
-                    mult = TRAIL_TIER2_ATR
-                elif gain >= TRAIL_TIER1_GAIN:
-                    mult = TRAIL_TIER1_ATR
+                mult = exit_rules.tiered_trail_mult(
+                    pos.entry_price, pos.high_water,
+                    [(TRAIL_TIER1_GAIN, TRAIL_TIER1_ATR),
+                     (TRAIL_TIER2_GAIN, TRAIL_TIER2_ATR)])
                 if mult is not None:
-                    trailed = pos.high_water - mult * q.atr
-                    if trailed > pos.stop_price:
-                        prev = pos.stop_price
-                        pos.stop_price = trailed
+                    prev = pos.stop_price
+                    pos.stop_price = exit_rules.ratchet_stop(
+                        pos.stop_price, pos.high_water, q.atr, mult)
+                    if pos.stop_price > prev:
+                        gain = (pos.high_water / pos.entry_price) - 1.0
                         log.warning("xsect trail %s: +%.1f%% from entry -> "
                                     "stop %.2f -> %.2f (%.1fxATR below high "
                                     "water %.2f). LOCAL stop; the broker leg "
                                     "still sits at its original level.",
-                                    ticker, gain * 100, prev, trailed, mult,
-                                    pos.high_water)
+                                    ticker, gain * 100, prev, pos.stop_price,
+                                    mult, pos.high_water)
 
             if not pos.stop_price and q.atr:
                 derived = pos.entry_price - XSECT.atr_stop_multiple * q.atr
