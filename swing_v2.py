@@ -739,10 +739,16 @@ def _daily_exits(bars: dict[str, list[dict]], live: bool):
         # structure stop into a tighter one and stops the trade out in normal
         # noise before the thesis has had room.
         if TRAIL_ATR > 0 and atr_now and p.r > 0:
-            if p.high_water >= p.entry_px + TRAIL_AFTER_R * p.r:
-                trailed = p.high_water - TRAIL_ATR * atr_now
-                if trailed > p.stop:
-                    p.stop = trailed
+            # exit_rules owns the arithmetic (engage-after-R + never-widen);
+            # the thresholds stay here as this strategy's parameters.
+            try:
+                import exit_rules
+                p.stop = exit_rules.trail_after_r(
+                    p.entry_px, p.high_water, p.r, TRAIL_AFTER_R,
+                    atr_now, TRAIL_ATR, p.stop)
+            except ImportError:      # standalone/backtest use
+                if p.high_water >= p.entry_px + TRAIL_AFTER_R * p.r:
+                    p.stop = max(p.stop, p.high_water - TRAIL_ATR * atr_now)
 
         # ---- exit priority: stop-like reasons first, then structure -------
         if VOL_EXIT_MULT > 0 and atr_now and p.entry_atr > 0 \
