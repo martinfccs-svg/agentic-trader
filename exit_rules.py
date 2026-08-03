@@ -80,6 +80,37 @@ def trail_after_r(entry: float, high_water: float, r: float,
     return ratchet_stop(current_stop, high_water, atr, atr_mult)
 
 
+def ratchet_stop_pct(current_stop: float, high_water: float,
+                     pct: float) -> float:
+    """Percentage trail — the same never-widen guarantee, different metric.
+
+    Intraday trails a fixed percentage of the high-water mark rather than a
+    multiple of ATR, because on 1-minute bars ATR is a noisy denominator and
+    the desk's stops are already structure-derived. Kept separate from
+    ratchet_stop rather than merged behind a flag: they answer to different
+    inputs, and a single function taking "either an ATR or a percentage"
+    would be the kind of false unification this library exists to avoid.
+    """
+    if pct <= 0:
+        return current_stop
+    return max(current_stop, high_water * (1.0 - pct))
+
+
+def stale_thesis_stop(days_held: int, max_days: int) -> Optional[str]:
+    """Time stop with NO profit condition — for desks where age alone
+    invalidates the setup.
+
+    Distinct from time_stop() on purpose. A mean-reversion trade that has not
+    reverted in N days has a stale thesis whether or not it happens to be
+    green; a trend trade that is winning after N days is doing exactly what
+    was asked of it. Collapsing the two would silently stop meanrev exiting
+    profitable-but-stale positions.
+    """
+    if max_days <= 0 or days_held < max_days:
+        return None
+    return f"time({days_held}d)"
+
+
 def volatility_exit(atr_now: Optional[float], atr_at_entry: Optional[float],
                     mult: float) -> Optional[str]:
     """Realised volatility has expanded far past what the position was sized
