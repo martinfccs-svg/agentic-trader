@@ -16,8 +16,10 @@ from risk import position_size
 import regime_allocation
 import portfolio_manager
 import loss_cooldown
+import exit_exec
 import correlation_manager
 from safety import market_is_open
+from indicators import ema as _ema  # canonical (2026-08-02)
 
 log = logging.getLogger("swing")
 
@@ -53,16 +55,6 @@ try:
 except Exception:  # noqa: BLE001
     _ENGINE_RISK = 0.01
 _SWING_RISK = None      # resolved lazily so tests can re-read the env
-
-
-def _ema(values, n):
-    if len(values) < n:
-        return None
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    for v in values[n:]:
-        e = v * k + e * (1 - k)
-    return e
 
 
 def _trading_days_since(entry_epoch: float) -> int:
@@ -274,24 +266,13 @@ class SwingRiskEngine:
                         and q.price < pos.entry_price + r:
                     why = f"time({held}d without +1R)"
                 if why and market_is_open():
-                    try:
-                        entry_price, shares = pos.entry_price, pos.shares
-                        realized = self._broker.sell(ticker, q.price)
-                        self._log.record_close(System.SWING, realized)
-                        if realized is not None and realized < 0:
-                            loss_cooldown.note_loss("swing", ticker)
-                        log.warning("swing v2-exit %s: %s realized=%s",
-                                    ticker, why,
-                                    f"{realized:+.2f}" if realized is not None
-                                    else "n/a")
-                        if realized is not None:
-                            self._notifier.notify_exit(
-                                ticker=ticker, shares=shares,
-                                exit_price=q.price, entry_price=entry_price,
-                                pnl=realized, system=System.SWING.value)
-                    except Exception as e:  # noqa: BLE001
-                        log.error("swing v2-exit %s failed (retry next "
-                                  "cycle): %s", ticker, e)
+                    # Mechanics live in exit_exec: sell, book, notify, arm the
+                    # cooldown, contain failure. The POLICY above (which
+                    # reason fired) stays here, where the desk's own rules
+                    # belong.
+                    exit_exec.close_position(
+                        self._broker, self._log, ticker, q.price, why,
+                        System.SWING, self._notifier, "swing")
                     continue
             # Local stop is a BACKUP to the broker-side GTC leg, which is
             # live 24/7. Firing it while the market is CLOSED just sells at a
