@@ -1,285 +1,295 @@
-"""config_check.py — validate the environment BEFORE the trading day starts.
-
-Every failure this catches has actually happened in this project. None of
-them raised an error; each cost a session or a debugging afternoon:
-
-  * DAILY_LOOKBACK_DAYS=120 was silently floored to 500 by the feed, and
-    logged a warning at error severity on every boot for a week
-  * MR_MAX_POS is the real name; MEANREV_MAX_POS is the one you reach for.
-    Setting the second does nothing at all, silently
-  * SWING_V2_ROUTE was set but the running process never saw it — a variable
-    only reaches a container on the deploy that follows saving it
-  * PORTFOLIO_HEAT_MAX=0 means MEASURE-ONLY, not "no heat permitted" — the
-    same digit means opposite things in different systems
-
-The philosophy is the same as the GATES banner: a configuration fact should
-be STATED, not inferred. This runs once at boot, prints what it found, and
-never blocks startup — a validator that halts trading over a warning would
-be a worse failure than the ones it prevents.
-
-Severity:
-  ERROR    the setting cannot do what it looks like it does
-  WARN     legal but surprising, or a known trap
-  INFO     measure-only / disabled features, listed so nothing is assumed live
+"""Swing engine (v6): consumes TREND signals from the price-action scanner.
+Daily timeframe. Wide ATR stop, risk-based sizing, liquidity filter, multi-day
+hold, NO end-of-day flatten. Works against whichever Broker is wired (paper or
+alpaca) — the engine doesn't know or care which.
 """
 
 from __future__ import annotations
 
-import difflib
 import logging
 import os
 
-log = logging.getLogger("config_check")
+import audit
+from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
+from models import Action, Signal, System
+from risk import position_size
+import portfolio_manager
+import loss_cooldown
+import exit_exec
+import correlation_manager
+from safety import market_is_open
+from indicators import ema as _ema  # canonical (2026-08-02)
 
-# Every variable the codebase actually reads. Anything set that is NOT here is
-# either a typo or dead config — both worth knowing about.
-KNOWN = {
-    "ABSENT_CONFIRM_SECS", "AFTER_HOURS_INTERVAL_SECS", "ALPACA_API_KEY",
-    "ALPACA_PAPER", "ALPACA_SECRET_KEY", "APCA_API_BASE_URL",
-    "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "BROKER",
-    "COMMISSION_PER_TRADE", "CONCENTRATION_TOP_N", "CONCENTRATION_TOP_N_MAX",
-    "CORRELATION_BLOCK", "CORRELATION_LOOKBACK", "CORRELATION_MIN_OBS",
-    "CORRELATION_MODE", "CORRELATION_WARN", "DAILY_BARS_REFRESH_CYCLES",
-    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR",
-    "DRAWDOWN_SCALING", "DRAWDOWN_STATE_PATH", "ENABLED_SYSTEMS",
-    "ENTRY_SETTLE_GRACE_SECS", "FINNHUB_API_KEY", "FLATTEN_BEFORE_CLOSE_MIN",
-    "INTRADAY_ATR_MULT", "INTRADAY_COOLDOWN_MIN", "INTRADAY_ENTRIES",
-    "INTRADAY_LOOKBACK_MIN", "INTRADAY_MAX_POS", "INTRADAY_REQUIRE_VWAP",
-    "INTRADAY_RESOLUTION", "INTRADAY_RV_GATE", "INTRADAY_SCORE_MIN",
-    "INTRADAY_TRAIL_PCT", "INTRADAY_UNIVERSE", "INTRADAY_V2_GATE",
-    "LIVE_CONFIRM", "LOSS_COOLDOWN_PATH", "MARKET_CLOSE", "MARKET_OPEN",
-    "MAX_PARTICIPATION_PCT", "MAX_POSITION_PCT", "MAX_POSITION_SIZE",
-    "MAX_SLIPPAGE_BPS", "MEANREV_ADX_MAX", "MEANREV_ADX_PERIOD",
-    "MEANREV_BB_K", "MEANREV_BB_PERIOD", "MEANREV_LOSS_COOLDOWN_DAYS",
-    "MEANREV_RS_LOOKBACK", "MEANREV_SCORE_MIN", "MEANREV_SCORING",
-    "MEANREV_TIME_STOP_DAYS", "MEANREV_TRAIL_ATR", "MEANREV_VOL_DRY_RATIO",
-    "MEANREV_VOL_EXIT_MULT", "MIN_DAILY_LOOKBACK_CALENDAR_DAYS",
-    "MIN_DOLLAR_VOL", "MIN_PRICE", "MR_ATR_MULT", "MR_MAX_POS",
-    "MR_RSI_EXIT", "MR_RSI_OVERSOLD", "MR_RSI_PERIOD", "MR_TREND_SMA",
-    "NTFY_TOPIC", "OPENING_RANGE_MIN", "PORTFOLIO_HEAT_LOG",
-    "PORTFOLIO_HEAT_MAX", "PORTFOLIO_HEAT_TAPER", "POSITION_STATE_PATH",
-    "RANK_SIGNALS", "RATE_LIMIT_CALLS", "REGIME_ADX_MIN", "REGIME_ALLOC",
-    "REGIME_ALLOC_CONF_BLEND", "REGIME_ALLOC_FAIL_TTL_SECS",
-    "REGIME_ALLOC_FLOOR", "REGIME_ALLOC_TTL_SECS", "REGIME_FAIL_TTL_SECS",
-    "REGIME_FILTER", "REGIME_PERSIST_DAYS", "REGIME_PERSIST_LOOKBACK",
-    "REGIME_SMA_DAYS", "REGIME_SYMBOL", "REGIME_TTL_SECS", "REQUIRE_UPTREND",
-    "RISK_PER_TRADE_PCT", "SCAN_INTERVAL_SECS", "SECTOR_MAX_PCT",
-    "SLIPPAGE_BPS", "START_EQUITY", "STOP_LOSS_PCT", "SWING_ATR_MULT",
-    "SWING_BREAKOUT_DAYS", "SWING_ENTRIES", "SWING_LOSS_COOLDOWN_DAYS",
-    "SWING_MAX_POS", "SWING_RISK_PCT", "SWING_V2_ADX",
-    "SWING_V2_ADX_DECAY", "SWING_V2_ADX_MIN", "SWING_V2_ENTRY",
-    "SWING_V2_MODE", "SWING_V2_RISK_PCT", "SWING_V2_ROUTE", "SWING_V2_RS",
-    "SWING_V2_RS_LOOKBACK", "SWING_V2_STATE", "SWING_V2_TIME_STOP_DAYS",
-    "SWING_V2_TRAIL_AFTER_R", "SWING_V2_TRAIL_ATR", "SWING_V2_VOL_EXIT",
-    "SWING_VOL_MULT", "TAKE_PROFIT_R", "TRADING_MODE", "TRAIL_PCT",
-    "TREND_SMA_DAYS", "UNIVERSE", "USE_BRACKET_ORDERS", "VOL_SPIKE_MULT",
-    "XSECT_ABS_MOMENTUM", "XSECT_ENTRY_PERIODS", "XSECT_EXIT_RANK_PAD",
-    "XSECT_MIN_RANKABLE", "XSECT_PERSIST_PATH", "XSECT_SECTOR_CAP",
-    "XSECT_TRAIL", "XSECT_TRAIL_T1_ATR", "XSECT_TRAIL_T1_GAIN",
-    "XSECT_TRAIL_T2_ATR", "XSECT_TRAIL_T2_GAIN", "XS_ATR_MULT",
-    "XS_LOOKBACK", "XS_SKIP", "XS_TOP_N",
-}
+log = logging.getLogger("swing")
 
-# The name you would naturally reach for -> the name the code actually reads.
-# Setting the left-hand one does NOTHING, silently. Every entry here is a
-# real trap someone has hit or would hit.
-# Confirmed dead on the 2026-08-03 boot — set in Railway, read by nothing.
-# Kept as explicit entries so the message names the replacement instead of
-# guessing, and so removing them from Railway is an informed decision.
-DEAD = {
-    "TAKE_PROFIT_PCT": "TAKE_PROFIT_R (the code works in R multiples, not %)",
-    "MAX_CONCURRENT_POSITIONS": "per-desk caps: SWING_MAX_POS, "
-                                "INTRADAY_MAX_POS, MR_MAX_POS, XS_TOP_N",
-    "MEANREV_USE_TAKE_PROFIT": "removed when the exit ladder replaced the "
-                               "fixed take-profit (2026-07-23)",
-    "XS_REBAL_CYCLES": "removed when rotation moved to a daily 10:00 gate",
-}
+# True when swing is running swing_v2's strategy end to end. Read from the
+# same env var swing_v2 uses, so entries and exits can never disagree about
+# which strategy the desk is running.
+_V2_ROUTE = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
+    "on", "true", "1", "yes")
+_V2_TIME_STOP = int(os.getenv("SWING_V2_TIME_STOP_DAYS", "15"))
 
-ALIASES = {
-    "MEANREV_MAX_POS": "MR_MAX_POS",
-    "MEANREV_ATR_MULT": "MR_ATR_MULT",
-    "MEANREV_RSI_OVERSOLD": "MR_RSI_OVERSOLD",
-    "MEANREV_RSI_PERIOD": "MR_RSI_PERIOD",
-    "MEANREV_RSI_EXIT": "MR_RSI_EXIT",
-    "MEANREV_TREND_SMA": "MR_TREND_SMA",
-    "XSECT_TOP_N": "XS_TOP_N",
-    "XSECT_LOOKBACK": "XS_LOOKBACK",
-    "XSECT_SKIP": "XS_SKIP",
-    "XSECT_ATR_MULT": "XS_ATR_MULT",
-    "SWING_V2_ENABLED": "SWING_V2_ROUTE",
-    "PORTFOLIO_HEAT": "PORTFOLIO_HEAT_MAX",
-    "CORRELATION_MAX": "CORRELATION_BLOCK",
-}
-
-# name -> (low, high, note). Inclusive.
-RANGES = {
-    "RISK_PER_TRADE_PCT": (0.0001, 0.05, "fraction of equity, not percent"),
-    "SWING_RISK_PCT": (0.0001, 0.05, "fraction of equity, not percent"),
-    "SWING_V2_RISK_PCT": (0.0001, 0.05, "fraction of equity, not percent"),
-    "MAX_POSITION_PCT": (0.01, 1.0, "fraction of equity"),
-    "PORTFOLIO_HEAT_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
-    "PORTFOLIO_HEAT_TAPER": (0.0, 1.0, "fraction; 0 = off"),
-    "SECTOR_MAX_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
-    "CONCENTRATION_TOP_N_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
-    "MAX_PARTICIPATION_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
-    "CORRELATION_WARN": (0.0, 1.0, "correlation coefficient"),
-    "CORRELATION_BLOCK": (0.0, 1.0, "correlation coefficient"),
-    "INTRADAY_SCORE_MIN": (0.0, 1.0, "score is 0-1"),
-    "MEANREV_SCORE_MIN": (0, 6, "score is 0-6"),
-    "REGIME_ALLOC_FLOOR": (0.0, 1.0, "multiplier floor"),
-    "REGIME_ADX_MIN": (0, 100, "ADX is 0-100"),
-    "SWING_V2_ADX_MIN": (0, 100, "ADX is 0-100"),
-    "XSECT_SECTOR_CAP": (0, 10, "names per sector; 0 = uncapped"),
-    "SWING_MAX_POS": (1, 20, None),
-    "INTRADAY_MAX_POS": (1, 20, None),
-    "MR_MAX_POS": (1, 20, None),
-    "XS_TOP_N": (1, 20, None),
-}
-
-ENUMS = {
-    "CORRELATION_MODE": {"measure", "enforce"},
-    "MEANREV_SCORING": {"off", "shadow", "live"},
-    "REGIME_ALLOC": {"off", "shadow", "live"},
-    "SWING_V2_MODE": {"off", "shadow", "live"},
-    "SWING_V2_ENTRY": {"A", "B"},
-    "DRAWDOWN_SCALING": {"measure", "on", "off", "live", "true", "false"},
-    "TRADING_MODE": {"paper", "live"},
-}
-
-_TRUE = {"1", "true", "on", "yes"}
+# PER-DESK RISK (2026-08-01). The engine sizes every desk at
+# RISK_PER_TRADE_PCT (1%), but swing_v2 was written AND BACKTESTED at 0.75%
+# — so routing it through the engine unchanged would deploy positions ~33%
+# larger than the ones that were measured. Sharpe is scale-invariant, but
+# max drawdown is not: the tested -6.6% would become roughly -8.8%, eroding
+# the one advantage this strategy robustly has.
+#
+# RISK_PER_TRADE_PCT is global, so lowering it would shrink meanrev,
+# intraday and xsect too. This scales SWING's share count only, leaving the
+# other desks alone. Default: match the backtest when routing v2, otherwise
+# leave the engine's own figure untouched.
+def _swing_risk_pct() -> float:
+    env = os.getenv("SWING_RISK_PCT")
+    if env:
+        return float(env)
+    if _V2_ROUTE:
+        return float(os.getenv("SWING_V2_RISK_PCT", "0.0075"))
+    return _ENGINE_RISK
 
 
-def _truthy(v: str | None) -> bool:
-    return (v or "").strip().lower() in _TRUE
+try:
+    from config import RISK_PER_TRADE_PCT as _ENGINE_RISK
+except Exception:  # noqa: BLE001
+    _ENGINE_RISK = 0.01
+_SWING_RISK = None      # resolved lazily so tests can re-read the env
 
 
-def _num(name):
-    v = os.getenv(name)
-    if v is None or v.strip() == "":
-        return None
-    try:
-        return float(v)
-    except ValueError:
-        return "NaN"
+def _trading_days_since(entry_epoch: float) -> int:
+    from datetime import date, datetime, timezone
+    a = datetime.fromtimestamp(entry_epoch, tz=timezone.utc).date()
+    b = datetime.now(timezone.utc).date()
+    days, cur = 0, a
+    while cur < b:
+        cur = date.fromordinal(cur.toordinal() + 1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
+
+# ---------------------------------------------------------------------------
+# ENTRY BENCH (2026-07-20 operator decision: "swing has been bleeding").
+# SWING_ENTRIES=false suppresses NEW entries only, at the last possible
+# moment — after every real gate (kill switch, max positions, liquidity,
+# sizing) has passed — so each suppressed line is a full-fidelity shadow
+# trade for the A/B against swing_v2.
+#
+# Deliberately NOT done via ENABLED_SYSTEMS: benching there unbuilds the
+# engine, which (a) trips the benched_held boot HALT while the 4 open swing
+# positions exist, and (b) kills scans and stop management. This flag keeps
+# the engine alive: scans run (ghost #1), manage_open_positions still
+# trails/exits the open book, only the buy is withheld.
+# ---------------------------------------------------------------------------
+SWING_ENTRIES = os.getenv("SWING_ENTRIES", "true").lower() == "true"
 
 
-def validate() -> tuple[int, int]:
-    """Log every finding. Returns (errors, warnings). NEVER raises, never
-    blocks boot — a config validator that halts trading is a worse bug than
-    the ones it catches."""
-    errors, warns, infos = [], [], []
+class NullNotifier:
+    """No-op stand-in for the optional trade notifier (2026-07-16).
 
-    # ---- typos and dead config ----------------------------------------
-    for k in sorted(os.environ):
-        if k in DEAD:
-            errors.append(f"{k} is set but nothing reads it — {DEAD[k]}. "
-                          f"Remove it from Railway.")
-        elif k in ALIASES:
-            errors.append(f"{k} is set but the code reads {ALIASES[k]} — "
-                          f"this setting does NOTHING. Rename it.")
-        elif k not in KNOWN:
-            # Fuzzy match first: a transposition like SWNIG_MAX_POS shares no
-            # prefix with anything known, so a prefix test alone misses the
-            # most common kind of typo.
-            near = difflib.get_close_matches(k, KNOWN, n=1, cutoff=0.85)
-            if near:
-                errors.append(f"{k} is set but is not read by any module — "
-                              f"did you mean {near[0]}? As written it does "
-                              f"NOTHING.")
-            elif k.startswith(("SWING", "INTRADAY", "MEANREV", "MR_", "XS",
-                               "REGIME", "PORTFOLIO", "CORRELATION",
-                               "DRAWDOWN", "CONCENTRATION", "TRADE", "RISK",
-                               "MAX_", "DAILY", "FLATTEN", "SECTOR")):
-                warns.append(f"{k} looks like a trading setting but no module "
-                             f"reads it — typo, or left over from a removed "
-                             f"feature?")
+    The engines were given a required `notifier` arg while main.py never
+    passed one, so build() raised TypeError and the deploy could not boot.
+    Rather than delete the notify_* calls (destroying work) or guess at the
+    notifier's API, the parameter is now OPTIONAL and defaults to this
+    null object: every notify_* call becomes a silent no-op.
 
-    # ---- ranges --------------------------------------------------------
-    for name, (lo, hi, note) in RANGES.items():
-        v = _num(name)
-        if v is None:
-            continue
-        if v == "NaN":
-            errors.append(f"{name}={os.getenv(name)!r} is not a number")
-        elif not (lo <= v <= hi):
-            errors.append(f"{name}={v} is outside [{lo}, {hi}]"
-                          + (f" — {note}" if note else ""))
+    NOTE: audit.py independently mirrors every fill / close / halt / boot to
+    ntfy, so phone alerting is NOT lost while no notifier is wired. To
+    restore the engines' own notifications, construct the real notifier in
+    main.py's build() and pass notifier=<it> to each engine.
+    """
 
-    # ---- enums ---------------------------------------------------------
-    for name, allowed in ENUMS.items():
-        v = os.getenv(name)
-        if v and v.strip().lower() not in {a.lower() for a in allowed}:
-            errors.append(f"{name}={v!r} is not one of "
-                          f"{sorted(allowed)} — the code will fall back to "
-                          f"its default, silently")
+    def __getattr__(self, _name):
+        return lambda *a, **k: None
 
-    # ---- contradictions (each one has bitten this project) -------------
-    if _truthy(os.getenv("SWING_V2_ROUTE")) and \
-            os.getenv("SWING_ENTRIES", "true").strip().lower() not in _TRUE:
-        errors.append("SWING_V2_ROUTE=on but SWING_ENTRIES is off — swing_v2 "
-                      "will generate signals that the engine then refuses. "
-                      "The desk looks live and trades nothing.")
 
-    taper, hmax = _num("PORTFOLIO_HEAT_TAPER"), _num("PORTFOLIO_HEAT_MAX")
-    if taper and taper > 0 and (not hmax or hmax == 0):
-        warns.append("PORTFOLIO_HEAT_TAPER is set while PORTFOLIO_HEAT_MAX=0 "
-                     "(measure-only) — the taper has no ceiling to taper "
-                     "toward and will use a degenerate span.")
-    if taper and hmax and 0 < hmax <= taper:
-        errors.append(f"PORTFOLIO_HEAT_TAPER={taper} >= PORTFOLIO_HEAT_MAX="
-                      f"{hmax} — tapering would start at or after the halt.")
+class SwingRiskEngine:
+    def __init__(self, feed, broker, kill, logger, notifier=None):
+        self._feed, self._broker, self._kill, self._log = feed, broker, kill, logger
+        self._notifier = notifier or NullNotifier()
 
-    warn_c, block_c = _num("CORRELATION_WARN"), _num("CORRELATION_BLOCK")
-    if warn_c and block_c and warn_c > block_c:
-        errors.append(f"CORRELATION_WARN={warn_c} > CORRELATION_BLOCK="
-                      f"{block_c} — reduce would trigger above reject, so "
-                      f"REDUCE can never fire.")
+    def _open(self):
+        return sum(1 for p in self._broker.positions.values()
+                   if p.system is System.SWING)
 
-    if (os.getenv("SWING_V2_MODE", "").strip().lower() == "live"):
-        warns.append("SWING_V2_MODE=live is REFUSED in code (v2 orders would "
-                     "orphan at reconcile). Use SWING_V2_ROUTE=on to route "
-                     "its signals through swing_engine instead.")
+    def handle_signal(self, signal: Signal):
+        if not self._kill.may_open(System.SWING):
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_KILL_SWITCH)
+            return
+        # Per-ticker loss cooldown (2026-07-26). From the autopsy: swing's
+        # closed trades were 6 on META, 5 of them losses — a re-entry pattern,
+        # not six independent bad signals. Blocks re-entry into a name that
+        # recently stopped us out. SWING_LOSS_COOLDOWN_DAYS=0 disables.
+        _cool, _why = loss_cooldown.in_cooldown("swing", signal.ticker)
+        if _cool:
+            log.warning("SWING COOLDOWN %s: %s", signal.ticker, _why)
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK,
+                             f"loss cooldown: {_why}")
+            return
+        if self._open() >= SWING.max_positions or signal.ticker in self._broker.positions:
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK)
+            return
+        q = self._feed.get_quote(signal.ticker)
+        if q is None or q.atr is None:
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK, "no quote/atr")
+            return
+        # q.avg_dollar_volume and q.atr are DAILY-scale by the feed's contract
+        # (feed_layer.get_quote, fixed 2026-07-15). Before that fix this gate
+        # and the stop below both ran on 1-minute scale.
+        if q.price < MIN_PRICE or (q.avg_dollar_volume or 0) < MIN_DOLLAR_VOL:
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_LIQUIDITY)
+            return
+        stop = q.price - SWING.atr_stop_multiple * q.atr
+        shares = position_size(self._broker.equity, q.price, stop,
+                               getattr(self._broker, "cash", 1e12))
+        # Regime allocation (2026-07-24): scale SHARES, not the equity passed
+        # to position_size — scaling equity would also scale the 10%-notional
+        # cap, loosening a risk limit as a side effect of a sizing decision.
+        # Returns 1.0 unless REGIME_ALLOC=live.
+        # Per-desk risk: RECOMPUTED, not scaled. Scaling the number
+        # position_size returned is wrong whenever the notional cap binds —
+        # and with a 10% cap on liquid names it binds often. Worked example
+        # (RTX, equity 95k, risk/share 14.41): the correct 0.75% size is
+        # min(49.4 risk-shares, 43.45 cap-shares) = 43.45, while scaling the
+        # capped 1% figure gives 43.45 x 0.75 = 32.59 — a 25% under-size that
+        # would NOT match the backtest, which applies risk% and the cap in
+        # this same order.
+        _risk = _swing_risk_pct()
+        if abs(_risk - _ENGINE_RISK) > 1e-12:
+            try:
+                from config import max_position_dollars
+                _dist = q.price - stop
+                if _dist > 0:
+                    _cash = getattr(self._broker, "cash", 1e12)
+                    _before = shares
+                    shares = min(self._broker.equity * _risk / _dist,
+                                 max_position_dollars(self._broker.equity)
+                                 / q.price,
+                                 _cash / q.price)
+                    log.info("swing risk %.4f (engine default %.4f): "
+                             "%.2f -> %.2f shares", _risk, _ENGINE_RISK,
+                             _before, shares)
+            except Exception as e:  # noqa: BLE001 — never break sizing
+                log.error("swing per-desk risk failed (%s) — using the "
+                          "engine's own size", e)
 
-    look = _num("DAILY_LOOKBACK_DAYS")
-    floor = _num("MIN_DAILY_LOOKBACK_CALENDAR_DAYS") or 500
-    if look and look < floor:
-        warns.append(f"DAILY_LOOKBACK_DAYS={look:.0f} is below the feed's "
-                     f"floor of {floor:.0f} and will be silently raised. Set "
-                     f"it to {floor:.0f} to stop the boot warning.")
+        # ONE decision point (2026-08-02). Heat, sector budget, correlation,
+        # regime and the final notional clamp are evaluated together by
+        # portfolio_manager and logged as a single auditable line. These used
+        # to be separate calls in each engine — seven call sites across four
+        # files, which is precisely how a multiplier gets applied twice.
+        shares, _pdec = portfolio_manager.apply(
+            shares, self._feed, self._broker, signal.ticker, System.SWING,
+            q.price, stop, self._broker.equity)
+        if shares <= 0:
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK,
+                             f"portfolio manager: {_pdec}")
+            return
+        if shares <= 0:
+            self._log.record(signal, System.SWING, Action.REJECTED_BY_RISK, "size=0")
+            return
+        if not SWING_ENTRIES:
+            # Full dry-run complete; withhold only the order. Mirrored to the
+            # persistent audit trail (never notifies, never raises) because
+            # Railway purges logs on redeploy and these lines ARE the A/B data.
+            log.warning("SWING1 SHADOW would_trade %s x%.2f @ %.2f stop=%.2f "
+                        "(%s) — entries benched via SWING_ENTRIES=false",
+                        signal.ticker, shares, q.price, stop, signal.reason)
+            audit.record("swing1_shadow_signal", notify=False,
+                         ticker=signal.ticker, shares=round(shares, 2),
+                         px=round(q.price, 2), stop=round(stop, 2),
+                         reason=signal.reason)
+            return
+        pos = self._broker.buy(signal.ticker, shares, q.price, System.SWING,
+                               signal.source, stop)
+        if pos is None:
+            # Broker refused (duplicate coid / existing position). Do not
+            # notify or log an open that did not happen.
+            log.warning("swing: broker refused %s — no position opened",
+                        signal.ticker)
+            return
+        self._notifier.notify_entry(
+            ticker=signal.ticker, shares=shares, price=q.price,
+            system=System.SWING.value, source=signal.source.value
+        )
+        self._log.record(signal, System.SWING, Action.OPENED,
+                         f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
-    enabled = (os.getenv("ENABLED_SYSTEMS") or "").lower()
-    if enabled:
-        for sysname, gate in (("swing", "SWING_ENTRIES"),
-                              ("intraday", "INTRADAY_ENTRIES")):
-            if sysname in enabled and \
-                    os.getenv(gate, "true").strip().lower() not in _TRUE:
-                infos.append(f"{sysname} is in ENABLED_SYSTEMS but {gate} is "
-                             f"off — it will scan and log, not trade.")
+    def manage_open_positions(self):
+        # Book any position whose broker-side bracket leg filled since the
+        # last cycle (keeps the tracker honest without a phantom close).
+        if hasattr(self._broker, "reconcile_filled_legs"):
+            for _t, realized in \
+                    self._broker.reconcile_filled_legs(System.SWING).items():
+                self._log.record_close(System.SWING, realized)
+                # Bracket legs are how most positions actually close (autopsy:
+                # exit paths were overwhelmingly bracket_leg). Arming the
+                # cooldown only from the local-stop path would leave it
+                # effectively dead.
+                if realized is not None and realized < 0:
+                    loss_cooldown.note_loss("swing", _t)
+        for ticker in list(self._broker.positions):
+            pos = self._broker.positions.get(ticker)
+            if pos is None or pos.system is not System.SWING:
+                continue
+            q = self._feed.get_quote(ticker)
+            if q is None:
+                continue
+            self._broker.mark(ticker, q.price)
 
-    # ---- measure-only inventory, so nothing is assumed live -------------
-    measure = []
-    for name, label in (("PORTFOLIO_HEAT_MAX", "portfolio heat"),
-                        ("SECTOR_MAX_PCT", "sector budget"),
-                        ("CONCENTRATION_TOP_N_MAX", "top-N concentration"),
-                        ("MAX_PARTICIPATION_PCT", "liquidity participation")):
-        v = _num(name)
-        if not v:
-            measure.append(label)
-    if os.getenv("CORRELATION_MODE", "measure").lower() != "enforce":
-        measure.append("correlation")
-    if os.getenv("DRAWDOWN_SCALING", "measure").lower() not in ("on", "live"):
-        measure.append("drawdown scaling")
-    if measure:
-        infos.append("MEASURE-ONLY (logging, not enforcing): "
-                     + ", ".join(measure))
-
-    # ---- report --------------------------------------------------------
-    for m in errors:
-        log.error("CONFIG ERROR: %s", m)
-    for m in warns:
-        log.warning("CONFIG WARN: %s", m)
-    for m in infos:
-        log.warning("CONFIG INFO: %s", m)
-    log.warning("CONFIG CHECK: %d error(s), %d warning(s) — startup "
-                "continues either way", len(errors), len(warns))
-    return len(errors), len(warns)
+            # ---- EXIT REGIME (2026-08-01) --------------------------------
+            # With SWING_V2_ROUTE=on the desk runs swing_v2's strategy, and
+            # its exits are part of what the backtest measured: hold while
+            # price stays above the 20-EMA, plus a time stop if the trade has
+            # not reached +1R. Grafting v2 entries onto old swing's 2.5xATR
+            # trail would deploy a combination that was never tested.
+            # The structure stop set at entry stays as the hard floor and is
+            # never widened.
+            v2_exits = _V2_ROUTE
+            if not v2_exits and q.atr is not None:
+                pos.stop_price = max(
+                    pos.stop_price,
+                    pos.high_water - SWING.atr_stop_multiple * q.atr)
+            elif v2_exits:
+                bars = self._feed.get_daily_bars(ticker)
+                closes = bars.close if bars else []
+                e20 = _ema(closes, 20) if len(closes) >= 20 else None
+                held = _trading_days_since(pos.entry_time)
+                r = (pos.entry_price - (pos.entry_stop or pos.stop_price))
+                why = None
+                if e20 and closes and closes[-1] < e20 and held >= 2:
+                    why = f"ema20(close {closes[-1]:.2f} < {e20:.2f})"
+                elif held >= _V2_TIME_STOP and r > 0 \
+                        and q.price < pos.entry_price + r:
+                    why = f"time({held}d without +1R)"
+                if why and market_is_open():
+                    # Mechanics live in exit_exec: sell, book, notify, arm the
+                    # cooldown, contain failure. The POLICY above (which
+                    # reason fired) stays here, where the desk's own rules
+                    # belong.
+                    exit_exec.close_position(
+                        self._broker, self._log, ticker, q.price, why,
+                        System.SWING, self._notifier, "swing")
+                    continue
+            # Local stop is a BACKUP to the broker-side GTC leg, which is
+            # live 24/7. Firing it while the market is CLOSED just sells at a
+            # stale quote — on 2026-07-16 that dumped UNH/INTC/MU at
+            # "quote-est" prices 30 min after the bell. If a stop is genuinely
+            # hit during the session, the broker's own leg fills it.
+            if q.price <= pos.stop_price and market_is_open():
+                try:
+                    exit_price = q.price
+                    entry_price = pos.entry_price
+                    shares = pos.shares
+                    realized = self._broker.sell(ticker, exit_price)
+                    self._log.record_close(System.SWING, realized)
+                    if realized is not None and realized < 0:
+                        loss_cooldown.note_loss("swing", ticker)
+                    if exit_price is not None and realized is not None:
+                        self._notifier.notify_exit(
+                            ticker=ticker, shares=shares,
+                            exit_price=exit_price, entry_price=entry_price,
+                            pnl=realized, system=System.SWING.value,
+                        )
+                except Exception as e:  # noqa: BLE001 — one exit must not kill the loop
+                    log.error("swing stop-exit %s failed (retry next cycle): %s",
+                              ticker, e)
