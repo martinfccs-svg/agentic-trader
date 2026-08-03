@@ -44,7 +44,6 @@ from risk import position_size
 from safety import market_is_open
 from scan_health import DailyRebalanceGate
 import regime
-import regime_allocation
 import portfolio_manager
 import exit_rules
 from sector_map import sector_of
@@ -386,9 +385,6 @@ class CrossSectionalMomentumEngine:
                 log.warning("xsect rebalance: skip %s — portfolio manager "
                             "returned %s", ticker, _pdec)
                 continue
-            if _alloc != 1.0:
-                log.info("xsect regime sizing %s: x%.2f -> shares=%.2f",
-                         ticker, _alloc, shares)
             if shares <= 0:
                 log.warning("xsect rebalance: skip %s — size=0", ticker)
                 continue
