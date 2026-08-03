@@ -126,7 +126,7 @@ def build():
                     "(warn %.2f / block %.2f) SWING_V2_ROUTE=%s "
                     "SWING_RISK=%.4f PORTFOLIO_HEAT_MAX=%s SECTOR_MAX_PCT=%s "
                     "CONCENTRATION_TOP%d=%s DRAWDOWN_SCALING=%s "
-                    "MAX_PARTICIPATION=%s RANK_SIGNALS=%s",
+                    "MAX_PARTICIPATION=%s RANK_SIGNALS=%s BEARTREND=%s",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
                     _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
                     _cm.MODE, _cm.WARN_CORR, _cm.BLOCK_CORR,
@@ -141,7 +141,8 @@ def build():
                     _pm.DD_SCALE,
                     f"{_pm.MAX_PARTICIPATION:.2%}" if _pm.MAX_PARTICIPATION > 0
                     else "0 (measure)",
-                    "on" if RANK_SIGNALS else "off")
+                    "on" if RANK_SIGNALS else "off",
+                    __import__("beartrend_scoring").MODE + " (research only)")
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
@@ -304,6 +305,29 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             scan_swing_v2(UNIVERSE, equity=broker.equity)
         except Exception as e:  # noqa: BLE001
             log.error("swing_v2 shadow scan failed (non-fatal): %s", e)
+
+    # ---- BEARTREND RESEARCH SCAN (2026-08-03) -------------------------
+    # Records short CANDIDATES to /data/research/beartrend/ so the question
+    # "would a bear desk have been worth building?" is answerable later. It
+    # places no orders and there is no execution path — brokers.py cannot
+    # short. Contained: research telemetry must never cost a trading cycle.
+    #
+    # Runs on the daily-bar cadence, not every cycle: the gates are daily and
+    # re-scanning 68 names every minute would add nothing but load.
+    try:
+        import beartrend_scoring
+        if beartrend_scoring.MODE != "off" and beartrend_scoring.due():
+            _st = regime_allocation.current(feed, UNIVERSE)
+            _spy = feed.get_daily_bars(regime_allocation.SYMBOL)
+            beartrend_scoring.scan(
+                UNIVERSE,
+                bars_for=lambda t: feed.get_daily_bars(t),
+                bench_closes=(_spy.close if _spy else None),
+                health_record=None,
+                cio_regime=_st.label,
+                breadth=_st.breadth_pct)
+    except Exception as e:  # noqa: BLE001 — research must never break a cycle
+        log.error("beartrend research scan failed (non-fatal): %s", e)
 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
