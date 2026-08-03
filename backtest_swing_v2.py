@@ -582,16 +582,164 @@ def _markdown_report(results, windows, a, stamp) -> str:
     return "\n".join(md)
 
 
+
+# ---------------------------------------------------------------------------
+# WALK-FORWARD VALIDATION
+#
+# The problem this exists for, stated precisely: a 77-run sweep of the SAME
+# 365-day window produced Sharpe from -0.05 to 1.62 purely from parameter
+# choice, median 0.80. Any single in-sample number is therefore uninformative
+# — and picking the best one is choosing the maximum of a noisy distribution,
+# which does not survive contact with new data.
+#
+# Walk-forward answers a different question. Fit on a training window, test on
+# the NEXT window the fitting never saw, roll forward, repeat. The only number
+# that counts is the concatenated OUT-OF-SAMPLE result. If the in-sample
+# winner keeps winning out of sample, the parameter is doing work. If the
+# out-of-sample results scatter around the mean of all candidates, the
+# "winner" was noise and the honest conclusion is that this parameter should
+# not be tuned at all.
+#
+# The degradation ratio (out-of-sample Sharpe / in-sample Sharpe) is the
+# headline. Values near 1.0 mean the fit generalised. Values near 0 — or
+# negative — mean it did not, and no amount of further tuning will fix that.
+# ---------------------------------------------------------------------------
+WF_TRAIN_DAYS = int(os.getenv("WF_TRAIN_DAYS", "252"))    # ~1 trading year
+WF_TEST_DAYS = int(os.getenv("WF_TEST_DAYS", "63"))       # ~1 quarter
+
+# Candidates the fold CHOOSES BETWEEN on training data. Deliberately the same
+# knobs the exit sweep tests, so the two tools answer the same question in two
+# ways: the sweep asks "is this better in-sample?", walk-forward asks "does
+# choosing it in-sample help out-of-sample?"
+WF_CANDIDATES = [
+    ("baseline",    {}),
+    ("ATR trail",   {"trail_atr": 2.0, "trail_after_r": 1.0}),
+    ("vol exit",    {"vol_exit": 1.8}),
+    ("ADX decay",   {"adx_decay": 0.6}),
+]
+
+
+def _slice_stats(bars, dates, lo, hi, cfg, cost):
+    """Replay one date slice with one config. Returns stats or None."""
+    window = dates[lo:hi]
+    if len(window) < 30:
+        return None
+    curve, trades = run_config(bars, window, "A", False, 100_000, cost,
+                               exits=cfg)
+    years = max(len(window) / 252, 1e-9)
+    return stats(curve, trades, years)
+
+
+def walk_forward(a):
+    base, src = _resolve_universe(a)
+    print(f"Universe: {len(base)} symbols from {src}")
+    fetch_syms = base + (["SPY"] if "SPY" not in base else [])
+    days = max(a.days, WF_TRAIN_DAYS + WF_TEST_DAYS * 3)
+    print(f"fetching ~{days}d so several folds fit ...")
+    bars = fetch_bars(fetch_syms, days)
+    dates = sorted({b["t"][:10] for s in bars for b in bars[s]})
+    cost = a.cost_bps / 10000
+    warm = 60
+
+    folds, start = [], warm
+    while start + WF_TRAIN_DAYS + WF_TEST_DAYS <= len(dates):
+        folds.append((start, start + WF_TRAIN_DAYS,
+                      start + WF_TRAIN_DAYS + WF_TEST_DAYS))
+        start += WF_TEST_DAYS
+    if not folds:
+        print(f"\nNot enough history: {len(dates)} aligned days, need "
+              f"{warm + WF_TRAIN_DAYS + WF_TEST_DAYS}. Use a longer --days "
+              f"or shorten WF_TRAIN_DAYS.")
+        return
+    print(f"{len(dates)} aligned days -> {len(folds)} folds "
+          f"(train {WF_TRAIN_DAYS}d / test {WF_TEST_DAYS}d, rolling)\n")
+
+    rows, oos_by_cand = [], {n: [] for n, _ in WF_CANDIDATES}
+    for i, (lo, mid, hi) in enumerate(folds, 1):
+        best_name, best_sharpe, best_cfg = None, None, None
+        for name, cfg in WF_CANDIDATES:
+            st = _slice_stats(bars, dates, lo, mid, cfg, cost)
+            if st and (best_sharpe is None or st["sharpe"] > best_sharpe):
+                best_name, best_sharpe, best_cfg = name, st["sharpe"], cfg
+        if best_name is None:
+            continue
+        oos = _slice_stats(bars, dates, mid, hi, best_cfg, cost)
+        if oos is None:
+            continue
+        # every candidate's out-of-sample result, so the CHOICE can be judged
+        # against simply always using each one
+        for name, cfg in WF_CANDIDATES:
+            st = _slice_stats(bars, dates, mid, hi, cfg, cost)
+            if st:
+                oos_by_cand[name].append(st["sharpe"])
+        rows.append({"fold": i, "train": f"{dates[lo]}..{dates[mid-1]}",
+                     "test": f"{dates[mid]}..{dates[hi-1]}",
+                     "chosen": best_name, "is_sharpe": best_sharpe,
+                     "oos_sharpe": oos["sharpe"], "oos_total": oos["total"],
+                     "oos_maxdd": oos["maxdd"], "oos_trades": oos["trades"]})
+
+    if not rows:
+        print("no usable folds")
+        return
+
+    print("=" * 100)
+    print(f"{'fold':<5}{'train window':<26}{'test window':<26}"
+          f"{'chosen':<12}{'IS sh':>7}{'OOS sh':>8}{'OOS dd':>8}{'trades':>7}")
+    print("-" * 100)
+    for r in rows:
+        print(f"{r['fold']:<5}{r['train']:<26}{r['test']:<26}"
+              f"{r['chosen']:<12}{r['is_sharpe']:>7.2f}{r['oos_sharpe']:>8.2f}"
+              f"{r['oos_maxdd']:>7.1%}{r['oos_trades']:>7}")
+
+    is_m = statistics.mean(r["is_sharpe"] for r in rows)
+    oos_m = statistics.mean(r["oos_sharpe"] for r in rows)
+    degr = (oos_m / is_m) if is_m else 0.0
+    pos = sum(1 for r in rows if r["oos_sharpe"] > 0)
+    print("-" * 100)
+    print(f"{'MEAN':<5}{'':<52}{'':<12}{is_m:>7.2f}{oos_m:>8.2f}")
+    print(f"\n  folds with positive out-of-sample Sharpe: {pos}/{len(rows)}")
+    print(f"  DEGRADATION RATIO (OOS / IS): {degr:.2f}")
+    print("    ~1.0  the in-sample fit generalised")
+    print("    ~0.5  half the apparent edge was fitting")
+    print("    <=0   the choice carried no information out of sample")
+
+    print("\n  always-use-this-one, out of sample (the honest comparison):")
+    for name, _ in WF_CANDIDATES:
+        v = oos_by_cand[name]
+        if v:
+            print(f"    {name:<12} mean OOS sharpe {statistics.mean(v):>6.2f}"
+                  f"  over {len(v)} folds")
+    chosen_mean = oos_m
+    best_fixed = max((statistics.mean(v), n)
+                     for n, v in oos_by_cand.items() if v)
+    print(f"\n  selecting per fold: {chosen_mean:.2f}   |   "
+          f"always '{best_fixed[1]}': {best_fixed[0]:.2f}")
+    if chosen_mean <= best_fixed[0] + 0.02:
+        print("  -> IN-SAMPLE SELECTION ADDED NOTHING. Choosing a config per")
+        print("     fold did not beat simply fixing one. That is evidence the")
+        print("     parameter should NOT be tuned — pick the simplest and")
+        print("     leave it alone.")
+    else:
+        print("  -> selection beat every fixed choice; the parameter carries")
+        print("     information that survives out of sample.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--cost-bps", type=float, default=5.0)
+    ap.add_argument("--walk-forward", action="store_true",
+                    help="rolling train/test folds; reports the OUT-OF-SAMPLE "
+                         "result and the degradation ratio")
     ap.add_argument("--sweep-exits", action="store_true",
                     help="replay baseline + each adaptive exit one at a time, "
                          "on BOTH windows, and apply the promotion rules")
     ap.add_argument("--symbols-file", default=None,
                     help="optional; omit to read UNIVERSE from config.py")
     a = ap.parse_args()
+    if a.walk_forward:
+        walk_forward(a)
+        return
     if a.sweep_exits:
         sweep_exits(a)
         return
