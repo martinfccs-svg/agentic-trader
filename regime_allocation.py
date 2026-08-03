@@ -65,6 +65,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+from indicators import ema, ema_series  # canonical (2026-08-02)
 
 log = logging.getLogger("regime_allocation")
 
@@ -134,29 +135,6 @@ NEUTRAL = "WEAK_BULL"
 
 
 # ------------------------------------------------------------- indicators
-def ema(values: list[float], n: int) -> Optional[float]:
-    if len(values) < n:
-        return None
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    for v in values[n:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def ema_series(values: list[float], n: int) -> list[float]:
-    """EMA at each point from n onward (for slope)."""
-    if len(values) < n:
-        return []
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    out = [e]
-    for v in values[n:]:
-        e = v * k + e * (1 - k)
-        out.append(e)
-    return out
-
-
 def atr_pct(high: list[float], low: list[float], close: list[float],
             n: int = ATR_PERIOD) -> Optional[float]:
     if len(close) < n + 1 or not close[-1]:
