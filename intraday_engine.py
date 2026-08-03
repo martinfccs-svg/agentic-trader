@@ -14,6 +14,8 @@ import audit
 import intraday_scoring as ids
 import regime_allocation
 import portfolio_manager
+import exit_exec
+import exit_rules
 import correlation_manager
 from config import INTRADAY, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import atr, avg_dollar_volume
@@ -270,21 +272,27 @@ class IntradayRiskEngine:
             if q is None:
                 continue
             self._broker.mark(ticker, q.price)
-            pos.stop_price = max(pos.stop_price, pos.high_water * (1 - INTRADAY.trail_pct))
-            if q.price <= pos.stop_price:
+            # Percentage trail, not ATR: on 1-minute bars ATR is a noisy
+            # denominator. exit_rules keeps the never-widen guarantee in one
+            # place; the percentage itself stays this desk's parameter.
+            pos.stop_price = exit_rules.ratchet_stop_pct(
+                pos.stop_price, pos.high_water, INTRADAY.trail_pct)
+            if exit_rules.stop_hit(q.price, pos.stop_price):
                 # Crash #2 (2026-07-06) started here: a 404 from Alpaca killed
-                # the whole cycle. sell() now handles 404 as already-flat; any
-                # genuine failure is contained and retried next cycle.
-                try:
-                    realized = self._broker.sell(ticker, q.price)
-                    self._log.record_close(System.INTRADAY, realized)
-                    if realized is not None and realized < 0:
-                        # feed the loss cooldown: no immediate re-entry into
-                        # a name that just stopped us out (Jul-8 churn fix)
-                        ids.note_loss(ticker)
-                except Exception as e:  # noqa: BLE001
-                    log.error("stop-exit %s failed (will retry next cycle): %s",
-                              ticker, e)
+                # the whole cycle. exit_exec contains any failure and leaves
+                # the position in place to retry next cycle.
+                #
+                # cooldown_system=None on purpose: intraday runs its OWN
+                # minute-scale cooldown (45 min, EMA20 early release), not the
+                # 5-day per-ticker one. Taking both would bench a name for a
+                # week over one intraday stop.
+                ok, realized = exit_exec.close_position(
+                    self._broker, self._log, ticker, q.price, "stop",
+                    System.INTRADAY, getattr(self, "_notifier", None), None)
+                if ok and realized is not None and realized < 0:
+                    # Jul-8 churn fix: no immediate re-entry into a name that
+                    # just stopped us out.
+                    ids.note_loss(ticker)
 
     def flatten_all(self, reason: str):
         """Close every intraday position. Guarantees (post-2026-07-06):
