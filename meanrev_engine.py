@@ -16,7 +16,6 @@ from config import MEANREV, MIN_DOLLAR_VOL, MIN_PRICE
 from indicators import rsi
 import meanrev_scoring as mrs
 import portfolio_risk
-import regime_allocation
 import portfolio_manager
 import correlation_manager
 from models import Action, Signal, System
@@ -110,9 +109,6 @@ class MeanReversionEngine:
             self._log.record(signal, System.MEANREV, Action.REJECTED_BY_RISK,
                              f"portfolio manager: {_pdec}")
             return
-        if _alloc != 1.0:
-            log.info("meanrev regime sizing %s: x%.2f -> shares=%.2f",
-                     signal.ticker, _alloc, shares)
         # Conviction sizing (2026-07-24): only in live scoring mode, where a
         # scorecard actually gated the entry. Scales the SHARE COUNT, never
         # the equity passed to position_size — scaling equity would also
