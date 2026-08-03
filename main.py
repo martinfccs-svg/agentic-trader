@@ -126,7 +126,7 @@ def build():
                     "(warn %.2f / block %.2f) SWING_V2_ROUTE=%s "
                     "SWING_RISK=%.4f PORTFOLIO_HEAT_MAX=%s SECTOR_MAX_PCT=%s "
                     "CONCENTRATION_TOP%d=%s DRAWDOWN_SCALING=%s "
-                    "MAX_PARTICIPATION=%s",
+                    "MAX_PARTICIPATION=%s RANK_SIGNALS=%s",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
                     _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
                     _cm.MODE, _cm.WARN_CORR, _cm.BLOCK_CORR,
@@ -140,7 +140,8 @@ def build():
                     else "0 (measure)",
                     _pm.DD_SCALE,
                     f"{_pm.MAX_PARTICIPATION:.2%}" if _pm.MAX_PARTICIPATION > 0
-                    else "0 (measure)")
+                    else "0 (measure)",
+                    "on" if RANK_SIGNALS else "off")
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
@@ -148,6 +149,61 @@ def build():
     except Exception as e:  # noqa: BLE001 — banner must never block boot
         log.error("gate banner failed (non-fatal): %s", e)
     return feed, broker, logger, kill, swing, intraday, meanrev, xsect, router, scanner, engines
+
+
+RANK_SIGNALS = os.getenv("RANK_SIGNALS", "on").strip().lower() not in (
+    "off", "false", "0", "no")
+
+
+def _signal_quality(sig):
+    """A desk-local quality figure, or None if that desk has no score.
+
+    Reads only what the signal already carries — nothing is computed or
+    invented here."""
+    raw = getattr(sig, "raw", None) or {}
+    for key in ("score",):                    # intraday (0-1), meanrev (0-6)
+        if isinstance(raw.get(key), (int, float)):
+            return float(raw[key])
+    card = raw.get("card")
+    if isinstance(card, dict) and isinstance(card.get("score"), (int, float)):
+        return float(card["score"])
+    if isinstance(raw.get("adx"), (int, float)):
+        return float(raw["adx"])              # swing_v2: trend strength
+    return None
+
+
+def _rank_within_desk(sigs):
+    """Sort each desk's signals by its own score, best first. Desks keep
+    their relative order; signals without a score keep arrival order
+    (stable sort), so this can only ever re-order WITHIN a desk."""
+    if not RANK_SIGNALS or len(sigs) < 2:
+        return sigs
+    try:
+        buckets, order = {}, []
+        for s_ in sigs:
+            key = getattr(getattr(s_, "source", None), "value", "?")
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(s_)
+        out = []
+        for key in order:
+            group = buckets[key]
+            scored = [(i, x, _signal_quality(x)) for i, x in enumerate(group)]
+            if any(q is not None for _, _, q in scored) and len(group) > 1:
+                group = [x for _, x, _ in sorted(
+                    scored, key=lambda t: (-(t[2] if t[2] is not None
+                                             else float("-inf")), t[0]))]
+                log.info("ranked %d %s signal(s): %s", len(group), key,
+                         ", ".join(f"{x.ticker}"
+                                   f"({_signal_quality(x):.2f})"
+                                   if _signal_quality(x) is not None
+                                   else x.ticker for x in group))
+            out.extend(group)
+        return out
+    except Exception as e:  # noqa: BLE001 — ordering must never break a cycle
+        log.error("signal ranking failed (%s) — using arrival order", e)
+        return sigs
 
 
 def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, engines,
@@ -209,6 +265,19 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
                         "routed (set REGIME_FILTER=off to disable)",
                         len(sigs))
         else:
+            # WITHIN-DESK RANKING (2026-08-02). `sigs` used to be routed in
+            # arrival order, so with a per-day entry cap the first signals to
+            # be scanned won the slots — an artefact of universe ordering, not
+            # a judgement about the trades. Now each desk's signals are sorted
+            # by the score that desk already computes.
+            #
+            # Deliberately WITHIN desk only: meanrev scores 0-6, intraday 0-1,
+            # swing_v2 carries ADX. Those are not comparable, and inventing a
+            # common scale would mean inventing weights — the same objection
+            # that ruled out the composite momentum score and the weighted
+            # portfolio risk score. Cross-desk ranking waits for a shared
+            # evidence-based metric that does not yet exist.
+            sigs = _rank_within_desk(sigs)
             for sig in sigs:
                 router.route(sig)
     elif swing_sigs or meanrev_sigs:
@@ -283,6 +352,12 @@ def run(loop: bool, cycles: int = 40):
     # registry silently degrades entry_time to boot time and reports "no known
     # stop". A 898-byte audit.jsonl alongside 63 closed trades at the broker
     # is what prompted this check.
+    try:
+        import config_check
+        config_check.validate()
+    except Exception as e:  # noqa: BLE001 — a validator must never block boot
+        log.error("config_check failed (non-fatal): %s", e)
+
     try:
         import volume_check
         volume_check.check()
