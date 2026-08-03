@@ -48,6 +48,7 @@ import regime_allocation
 import portfolio_manager
 from sector_map import sector_of
 import xsect_persistence as xp
+from indicators import ema as _ema  # canonical (2026-08-02)
 
 log = logging.getLogger("xsectmom")
 
@@ -86,17 +87,6 @@ TRAIL_TIER1_GAIN = float(os.getenv("XSECT_TRAIL_T1_GAIN", "0.10"))
 TRAIL_TIER1_ATR = float(os.getenv("XSECT_TRAIL_T1_ATR", "3.0"))
 TRAIL_TIER2_GAIN = float(os.getenv("XSECT_TRAIL_T2_GAIN", "0.20"))
 TRAIL_TIER2_ATR = float(os.getenv("XSECT_TRAIL_T2_ATR", "2.0"))
-
-
-def _ema(values, n):
-    """EMA over a close series. Local to keep this module stdlib-only."""
-    if len(values) < n:
-        return None
-    k = 2.0 / (n + 1)
-    e = sum(values[:n]) / n
-    for v in values[n:]:
-        e = v * k + e * (1 - k)
-    return e
 
 
 class NullNotifier:
