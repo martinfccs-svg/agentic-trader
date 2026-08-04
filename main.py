@@ -155,6 +155,55 @@ def build():
 RANK_SIGNALS = os.getenv("RANK_SIGNALS", "on").strip().lower() not in (
     "off", "false", "0", "no")
 
+# ---------------------------------------------------------------------------
+# SYMBOL QUARANTINE (2026-08-04)
+#
+# Per-signal isolation stops one bad symbol killing a cycle. It does not stop
+# that symbol failing identically every cycle for the rest of the day —
+# logging the same stack trace, burning the same work, and burying anything
+# new in the noise.
+#
+# Deliberately IN-MEMORY and NOT persisted: a restart should clear it, because
+# a restart is often exactly what fixes the underlying condition. Persisting a
+# quarantine would let a transient failure bench a symbol across deploys.
+#
+# Only ROUTING EXCEPTIONS count. A signal legitimately rejected by risk, a
+# gate, or the portfolio manager is the system working — quarantining on
+# rejections would silence the desks.
+# ---------------------------------------------------------------------------
+QUARANTINE_FAILURES = int(os.getenv("QUARANTINE_FAILURES", "3"))
+QUARANTINE_MINUTES = float(os.getenv("QUARANTINE_MINUTES", "30"))
+_route_failures: dict = {}          # ticker -> [timestamps]
+_quarantined: dict = {}             # ticker -> release timestamp
+
+
+def _quarantine_check(ticker: str) -> bool:
+    """True if this ticker is currently benched. Releases automatically."""
+    until = _quarantined.get(ticker)
+    if until is None:
+        return False
+    if time.time() >= until:
+        del _quarantined[ticker]
+        _route_failures.pop(ticker, None)
+        log.warning("QUARANTINE RELEASED %s — routing resumes", ticker)
+        return False
+    return True
+
+
+def _quarantine_record(ticker: str) -> None:
+    """Record a routing exception; bench the ticker if it keeps failing."""
+    now = time.time()
+    window = QUARANTINE_MINUTES * 60
+    hits = [t for t in _route_failures.get(ticker, []) if now - t < window]
+    hits.append(now)
+    _route_failures[ticker] = hits
+    if len(hits) >= QUARANTINE_FAILURES and ticker not in _quarantined:
+        _quarantined[ticker] = now + window
+        log.error("QUARANTINE %s — %d routing failures in %.0f min. Skipping "
+                  "it for %.0f min so the same exception stops flooding the "
+                  "log and burning cycle time. Everything else continues.",
+                  ticker, len(hits), QUARANTINE_MINUTES, QUARANTINE_MINUTES)
+
 
 def _signal_quality(sig):
     """A desk-local quality figure, or None if that desk has no score.
@@ -210,6 +259,8 @@ def _rank_within_desk(sigs):
 def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, engines,
           n: int = 0, force_market_open=False):
     log.info("=== cycle %d start ===", n)
+    _cycle_t0 = time.time()
+    _health = {"scanned": 0, "routed": 0, "failed": 0, "quarantined": 0}
     feed.new_cycle()                     # one fetch per ticker this cycle (rate-limit fix)
     kill.check_emergencies()
     is_open = force_market_open or market_is_open()
@@ -279,8 +330,45 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             # portfolio risk score. Cross-desk ranking waits for a shared
             # evidence-based metric that does not yet exist.
             sigs = _rank_within_desk(sigs)
+            # PER-SIGNAL FAULT ISOLATION (2026-08-04). This loop was
+            # unwrapped, so ONE bad signal aborted the whole cycle — which is
+            # how a NameError on a single MSFT decision produced 10
+            # consecutive dead cycles instead of 10 logged errors. TSLA and
+            # everything behind it never ran.
+            #
+            # The engines already contain their own try/except; this is the
+            # backstop for anything they do not catch, including bugs in the
+            # routing path itself. A trading system should degrade one signal
+            # at a time, never all at once.
+            _routed, _failed_tickers, _skipped = 0, [], []
+            _health["scanned"] = len(sigs)
             for sig in sigs:
-                router.route(sig)
+                tkr = getattr(sig, "ticker", "?")
+                if _quarantine_check(tkr):
+                    _skipped.append(tkr)
+                    continue
+                try:
+                    router.route(sig)
+                    _routed += 1
+                except Exception as e:  # noqa: BLE001 — isolate, do not abort
+                    _failed_tickers.append(tkr)
+                    _quarantine_record(tkr)
+                    log.exception("ROUTE FAILED %s (%s) — signal dropped, "
+                                  "cycle continues: %s", tkr,
+                                  getattr(getattr(sig, "source", None),
+                                          "value", "?"), e)
+            if _failed_tickers:
+                # Name the tickers in the summary: a pattern across cycles is
+                # visible at a glance instead of by scrolling stack traces.
+                log.error("routing: %d of %d signal(s) failed (%s) — the "
+                          "cycle completed anyway", len(_failed_tickers),
+                          _routed + len(_failed_tickers),
+                          ", ".join(_failed_tickers))
+            if _skipped:
+                log.warning("routing: skipped %d quarantined signal(s): %s",
+                            len(_skipped), ", ".join(_skipped))
+            _health.update(routed=_routed, failed=len(_failed_tickers),
+                           quarantined=len(_skipped))
     elif swing_sigs or meanrev_sigs:
         log.info("market closed — %d signal(s) held, NOT routed. They are "
                  "re-derived from live prices at the next open.",
@@ -354,6 +442,36 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
         portfolio_risk.check(broker)
     except Exception as e:  # noqa: BLE001 — an instrument must never break a cycle
         log.error("portfolio heat read failed (non-fatal): %s", e)
+
+    # ---- ONE-LINE CYCLE HEALTH (2026-08-04) --------------------------
+    # Everything here was already being collected and logged in pieces
+    # across ~40 lines. One line makes a bad cycle visible at a glance and
+    # gives something greppable to trend over time; the detail above stays
+    # for when the summary says something is wrong.
+    try:
+        _hb = ""
+        try:
+            import portfolio_manager as _pmh
+            _h = _pmh._heat_now(broker)
+            _hb = f" heat={_h:.2%}" if _h is not None else ""
+        except Exception:  # noqa: BLE001
+            pass
+        _reg = ""
+        try:
+            import regime_allocation as _ra
+            _st = _ra.last_state()
+            if _st:
+                _reg = f" regime={_st.label}/{_st.confidence:.0f}%"
+        except Exception:  # noqa: BLE001
+            pass
+        log.warning("CYCLE %d HEALTH %.2fs | signals %d routed %d failed %d "
+                    "quarantined %d | positions %d equity=%.2f%s%s",
+                    n, time.time() - _cycle_t0, _health["scanned"],
+                    _health["routed"], _health["failed"],
+                    _health["quarantined"], len(broker.positions),
+                    broker.equity, _hb, _reg)
+    except Exception as e:  # noqa: BLE001 — telemetry must never break a cycle
+        log.error("cycle health line failed (non-fatal): %s", e)
 
     # Honest P&L: realized and unrealized logged separately, per system.
     for system in System:
