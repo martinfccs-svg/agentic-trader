@@ -199,6 +199,40 @@ def trend_exit(close: Optional[float], reference: Optional[float],
     return None
 
 
+def relative_strength_exit(stock_return: Optional[float],
+                           bench_return: Optional[float],
+                           lag_threshold: float,
+                           held_days: int = 0,
+                           min_days: int = 5) -> Optional[str]:
+    """The entry condition, inverted: the name stopped leading the index.
+
+    swing_v2 ENTERS on relative strength (63-day return above SPY's). A
+    position that is up 8% while SPY is up 15% has not merely paused — the
+    reason it was chosen is gone, and the capital is doing worse than the
+    index it was supposed to beat. Price-based exits cannot see this: the
+    trade is green, the trend is intact, the stop is far away.
+
+    Measured SINCE ENTRY rather than on a rolling window, because that is
+    what the trade actually earned. A name that ran 30% before entry keeps a
+    positive 63-day reading long after it stops working.
+
+    THE COST, which is why this is a sweep option and not a default: a
+    winner consolidating through a sharp index rally will lag temporarily and
+    be cut. `lag_threshold` buys tolerance for that; `min_days` stops it
+    firing on entry-day noise. Whether the trade-off is favourable is an
+    empirical question, and the harness answers it.
+    """
+    if stock_return is None or bench_return is None or lag_threshold <= 0:
+        return None
+    if held_days < min_days:
+        return None
+    lag = stock_return - bench_return
+    if lag < -abs(lag_threshold):
+        return (f"rs_decay(stock {stock_return:+.1%} vs bench "
+                f"{bench_return:+.1%}, lag {lag:+.1%})")
+    return None
+
+
 def time_stop(days_held: int, max_days: int, price: float, entry: float,
               r: float, require_r: float = 1.0) -> Optional[str]:
     """Held long enough without the move working — capital, not just risk.
