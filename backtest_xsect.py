@@ -246,7 +246,13 @@ def main():
     print(f"{len(dates)} trading days aligned (expected ~{expected} for "
           f"--days {a.days})")
     if len(dates) < 0.85 * expected:
-        counts = sorted(((len(closes[s]), s) for s in closes), key=lambda t: t[0])
+        # `closes` never existed here — the dict is `px` (2026-08-04). This
+        # is the SHORT-WINDOW diagnostic, so it only fires when the aligned
+        # window is already suspiciously small: exactly the moment you most
+        # need the diagnostic, and exactly when it would instead have raised
+        # NameError. Found by an AST scan for names used but never assigned,
+        # the same check added after the _alloc incident.
+        counts = sorted(((len(px[s]), s) for s in px), key=lambda t: t[0])
         short = ", ".join(f"{s}:{n}" for n, s in counts[:6])
         print(f"\n*** WARNING: the aligned window is only {len(dates)}/"
               f"{expected} days. Dates are intersected across ALL symbols, so "
