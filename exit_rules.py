@@ -111,6 +111,66 @@ def stale_thesis_stop(days_held: int, max_days: int) -> Optional[str]:
     return f"time({days_held}d)"
 
 
+ADX_TRAIL_BANDS = ((35.0, 3.0), (20.0, 2.0), (0.0, 1.5))
+
+
+def adx_trail_mult(adx: Optional[float], default: float = 2.0) -> float:
+    """ATR multiple chosen by trend STRENGTH, not fixed.
+
+        ADX > 35   ->  3.0x   a strong trend has earned room to breathe
+        ADX 20-35  ->  2.0x   the normal case
+        ADX < 20   ->  1.5x   drift, not trend — take what is there
+
+    Three parameters where there was one, so it is a sweep option rather than
+    a default. The principle is sound (a fixed distance treats a 40-ADX trend
+    and a 15-ADX drift identically); whether the specific bands help is a
+    question for the harness. A missing ADX returns the default rather than
+    guessing a band.
+    """
+    if adx is None:
+        return default
+    for floor, mult in ADX_TRAIL_BANDS:
+        if adx >= floor:
+            return mult
+    return default
+
+
+def staged_profit_lock(entry: float, high_water: float,
+                       atr: Optional[float], current_stop: float,
+                       ema20: Optional[float] = None) -> tuple[float, str]:
+    """Progressive protection in ATR units: the further a trade runs, the
+    less of the gain it is allowed to give back.
+
+        +1 ATR  ->  stop to breakeven
+        +2 ATR  ->  lock 0.5 ATR of profit
+        +3 ATR  ->  2xATR trail from the high water mark
+        +5 ATR  ->  trail the 20-EMA (tightest, for extended runners)
+
+    Returns (stop, stage_label). NEVER widens — every candidate stop goes
+    through ratchet-style max().
+
+    THE TRADE-OFF, stated because it is not free: tightening as a trade runs
+    reduces giveback and also cuts winners short. A trend strategy earns its
+    return from a small number of large moves, and a stop that tightens at
+    +3 ATR will exit some of the trades that would have gone to +10. Whether
+    that is a net gain is an empirical question, which is why this ships as a
+    sweep option rather than a default.
+    """
+    if atr is None or atr <= 0 or entry <= 0:
+        return current_stop, "none"
+    gain_atr = (high_water - entry) / atr
+    stop, stage = current_stop, "none"
+    if gain_atr >= 1.0:
+        stop, stage = max(stop, entry), "breakeven"
+    if gain_atr >= 2.0:
+        stop, stage = max(stop, entry + 0.5 * atr), "lock_0.5atr"
+    if gain_atr >= 3.0:
+        stop, stage = max(stop, high_water - 2.0 * atr), "trail_2atr"
+    if gain_atr >= 5.0 and ema20 is not None:
+        stop, stage = max(stop, ema20), "ema20_trail"
+    return stop, stage
+
+
 def volatility_exit(atr_now: Optional[float], atr_at_entry: Optional[float],
                     mult: float) -> Optional[str]:
     """Realised volatility has expanded far past what the position was sized
