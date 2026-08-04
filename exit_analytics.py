@@ -202,6 +202,40 @@ def main():
               f"{(wins/len(rr) if rr else 0):>7.0%}")
     print("-" * 94)
 
+    # ---- STOP EFFICIENCY (2026-08-04) --------------------------------
+    # How much of the risk actually got used. If losers routinely stop out
+    # having only ever gone -0.4R against you, the stop is far wider than the
+    # trade needs and every position is oversized for its real risk. If they
+    # routinely reach -0.95R first, the stop is doing its job at the edge.
+    losers = [t for t in trades if t.get("realized_r") is not None
+              and t["realized_r"] <= 0 and "mae_r" in t]
+    winners = [t for t in trades if t.get("realized_r") is not None
+               and t["realized_r"] > 0 and "mfe_r" in t]
+    if losers or winners:
+        print(f"\n{'='*94}\nEXIT EFFICIENCY\n{'='*94}")
+    if winners:
+        aw = sum(t["realized_r"] for t in winners) / len(winners)
+        pk = sum(t["mfe_r"] for t in winners) / len(winners)
+        gb = pk - aw
+        print(f"  winners  n={len(winners):<4} avg {aw:+.2f}R   peak "
+              f"{pk:+.2f}R   captured {aw/pk if pk else 0:.0%}   "
+              f"giveback {gb:.2f}R")
+    if losers:
+        al = sum(t["realized_r"] for t in losers) / len(losers)
+        am = sum(t["mae_r"] for t in losers) / len(losers)
+        # MAE is negative for a long that went against you; efficiency is how
+        # close the worst excursion came to the full 1R of risk taken.
+        eff = min(1.0, abs(am)) if am else 0.0
+        print(f"  losers   n={len(losers):<4} avg {al:+.2f}R   avg MAE "
+              f"{am:+.2f}R   stop efficiency {eff:.0%}")
+        if eff < 0.6:
+            print("    -> losers rarely approach the stop before exiting: the")
+            print("       stop is wider than the trade's real risk, so every")
+            print("       position is sized smaller than it needs to be.")
+        elif eff > 0.95:
+            print("    -> losers routinely reach the full stop distance: the")
+            print("       stop is at the edge of what the trade needs.")
+
     print("\nVERDICTS (only where the sample supports one)")
     for reason, ts in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         n = len(ts)
