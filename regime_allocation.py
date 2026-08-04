@@ -120,16 +120,22 @@ ALLOCATION: dict[str, dict[str, float]] = {
     # STRONG_BULL leans hardest on the strategies that benefit most from broad,
     # persistent advances (reviewer item 7). Unvalidated preference, not
     # evidence — flagged as such until the shadow log says otherwise.
+    # beartrend is 0.00 in both bull regimes ON PURPOSE: it is inert by
+    # construction, not by a flag someone could flip by accident. Even a
+    # complete short-side implementation would place no trades until a BEAR
+    # or SIDEWAYS classification persists. HIGH_VOL stays LOW (0.50), not
+    # high — violent bear-market rallies are where short squeezes live, so a
+    # volatility spike is not automatically a good shorting environment.
     "STRONG_BULL": {"swing": 1.25, "pullback": 1.35, "meanrev": 0.50,
-                    "intraday": 0.75, "xsectmom": 1.40},
+                    "intraday": 0.75, "xsectmom": 1.40, "beartrend": 0.00},
     "WEAK_BULL":   {"swing": 1.00, "pullback": 1.00, "meanrev": 1.00,
-                    "intraday": 1.00, "xsectmom": 1.00},
+                    "intraday": 1.00, "xsectmom": 1.00, "beartrend": 0.00},
     "SIDEWAYS":    {"swing": 0.50, "pullback": 0.50, "meanrev": 1.50,
-                    "intraday": 1.25, "xsectmom": 0.75},
+                    "intraday": 1.25, "xsectmom": 0.75, "beartrend": 0.25},
     "BEAR":        {"swing": 0.25, "pullback": 0.25, "meanrev": 0.75,
-                    "intraday": 0.75, "xsectmom": 0.50},
+                    "intraday": 0.75, "xsectmom": 0.50, "beartrend": 1.25},
     "HIGH_VOL":    {"swing": 0.25, "pullback": 0.25, "meanrev": 0.50,
-                    "intraday": 0.50, "xsectmom": 0.50},
+                    "intraday": 0.50, "xsectmom": 0.50, "beartrend": 0.50},
 }
 NEUTRAL = "WEAK_BULL"
 
@@ -444,6 +450,16 @@ def breadth_from_feed(feed, universe, offset: int = 0
     else:
         sect = None
     return b50, b200, sect
+
+
+def last_state():
+    """The cached RegimeState without recomputing, or None.
+
+    Added for the one-line cycle health summary (2026-08-04). Reads the
+    cache only — a telemetry line must never trigger a data fetch, or the
+    instrument starts affecting what it measures.
+    """
+    return _cache[1] if _cache else None
 
 
 def current(feed, universe=None) -> RegimeState:
