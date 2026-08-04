@@ -231,6 +231,8 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
     TRAIL = float(exits.get("trail_atr", 0) or 0)
     TRAIL_AFTER = float(exits.get("trail_after_r", 1.0) or 1.0)
     VOLX = float(exits.get("vol_exit", 0) or 0)
+    STAGED = bool(exits.get("staged_lock", False))
+    ADX_TRAIL = bool(exits.get("adx_trail", False))
     ADXD = float(exits.get("adx_decay", 0) or 0)
     equity = start_equity
     cash_curve = [equity]
@@ -258,6 +260,33 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
             if TRAIL and atr_now and p["r"] > 0 \
                     and p["hw"] >= p["e"] + TRAIL_AFTER * p["r"]:
                 p["stop"] = max(p["stop"], p["hw"] - TRAIL * atr_now)
+
+            # --- trail distance chosen by trend strength ---------------
+            if ADX_TRAIL and atr_now and p["r"] > 0 \
+                    and p["hw"] >= p["e"] + p["r"]:
+                try:
+                    import exit_rules
+                    _m = exit_rules.adx_trail_mult(
+                        _adx_bt([x["h"] for x in hist], [x["l"] for x in hist],
+                                [x["c"] for x in hist], 14))
+                    p["stop"] = max(p["stop"], p["hw"] - _m * atr_now)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # --- staged ATR profit lock (2026-08-04) -------------------
+            # Progressive protection: breakeven at +1 ATR, 0.5 ATR locked at
+            # +2, a 2xATR trail at +3, the 20-EMA at +5. Swept rather than
+            # assumed, because tightening as a trade runs both reduces
+            # giveback AND cuts winners short — and a trend strategy earns
+            # its return from the few trades that run furthest.
+            if STAGED and atr_now:
+                try:
+                    import exit_rules
+                    _s, _ = exit_rules.staged_profit_lock(
+                        p["e"], p["hw"], atr_now, p["stop"], e20)
+                    p["stop"] = max(p["stop"], _s)
+                except Exception:  # noqa: BLE001
+                    pass
 
             fill = None; reason = None
             if b["o"] <= p["stop"]:
@@ -385,6 +414,44 @@ def stats(curve, trades, years):
 
 
 
+def classify_regime(spy_closes: list[float]) -> str:
+    """A simplified regime label from SPY closes alone.
+
+    Deliberately NOT importing regime_allocation: that module needs a live
+    feed, breadth across the universe and 3-session persistence state, none
+    of which exist inside a replay. This uses the two conditions that carry
+    most of the signal — price vs the 200-day and the 50/200 relationship —
+    so the labels are directionally comparable to the live CIO layer without
+    pretending to reproduce it. Labels are prefixed BT_ in the output so
+    nobody mistakes them for the allocator's own classifications.
+    """
+    if len(spy_closes) < 200:
+        return "BT_UNKNOWN"
+    e50, e200 = ema(spy_closes, 50), ema(spy_closes, 200)
+    if e50 is None or e200 is None:
+        return "BT_UNKNOWN"
+    px = spy_closes[-1]
+    # realised volatility over 20 sessions vs 100, as a HIGH_VOL proxy
+    def _vol(w):
+        r = [abs(spy_closes[i] / spy_closes[i - 1] - 1)
+             for i in range(len(spy_closes) - w, len(spy_closes))]
+        return sum(r) / len(r) if r else 0.0
+    if len(spy_closes) >= 120 and _vol(20) > 1.6 * _vol(100):
+        return "BT_HIGH_VOL"
+    # A dead-flat tape drifts a fraction either side of its own average, and
+    # labelling that BEAR would attribute sideways results to a bear market.
+    # Require MEANINGFUL separation in both directions, mirroring the live
+    # allocator's 1% rule.
+    sep = (e50 - e200) / e200 if e200 else 0.0
+    if abs(sep) < 0.01:
+        return "BT_SIDEWAYS"
+    if px < e200 and e50 < e200:
+        return "BT_BEAR"
+    if px > e200 and e50 > e200:
+        return "BT_STRONG_BULL" if sep >= 0.05 else "BT_WEAK_BULL"
+    return "BT_SIDEWAYS"
+
+
 def _resolve_universe(a):
     """(symbols, source). Config first, explicit file second, hardcoded list
     only as a loudly-named last resort — a silent DEFAULT_SYMBOLS fallback is
@@ -424,6 +491,8 @@ EXIT_VARIANTS = [
     ("+ ATR trail",  {"trail_atr": 2.0, "trail_after_r": 1.0}),
     ("+ vol exit",   {"vol_exit": 1.8}),
     ("+ ADX decay",  {"adx_decay": 0.6}),
+    ("+ staged lock", {"staged_lock": True}),
+    ("+ ADX trail",   {"adx_trail": True}),
 ]
 
 
@@ -616,6 +685,8 @@ WF_CANDIDATES = [
     ("ATR trail",   {"trail_atr": 2.0, "trail_after_r": 1.0}),
     ("vol exit",    {"vol_exit": 1.8}),
     ("ADX decay",   {"adx_decay": 0.6}),
+    ("staged lock", {"staged_lock": True}),
+    ("ADX trail",   {"adx_trail": True}),
 ]
 
 
