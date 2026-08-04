@@ -202,6 +202,15 @@ class SwingRiskEngine:
             return
         pos = self._broker.buy(signal.ticker, shares, q.price, System.SWING,
                                signal.source, stop)
+        if pos is not None:
+            # Stamp the benchmark level at entry so the relative-strength
+            # exit can later ask whether the reason for this trade survived.
+            try:
+                _sb = self._feed.get_daily_bars("SPY")
+                if _sb and _sb.close:
+                    pos.bench_at_entry = _sb.close[-1]
+            except Exception:  # noqa: BLE001 — never block an entry
+                pass
         if pos is None:
             # Broker refused (duplicate coid / existing position). Do not
             # notify or log an open that did not happen.
@@ -273,13 +282,37 @@ class SwingRiskEngine:
                     in ("on", "true", "1", "yes"),
                     vol_exit_mult=float(os.getenv("SWING_V2_VOL_EXIT", "0")),
                     adx_decay_frac=float(os.getenv("SWING_V2_ADX_DECAY", "0")),
+                    rs_exit_lag=float(os.getenv("SWING_V2_RS_EXIT", "0")),
                     time_stop_days=_V2_TIME_STOP)
+                # Returns since entry for the relative-strength test. Skipped
+                # entirely when the option is off, so no benchmark fetch is
+                # paid for a check that is not running.
+                _sr = _br = None
+                if _cfg.rs_exit_lag > 0 and pos.entry_price:
+                    try:
+                        _sb = self._feed.get_daily_bars("SPY")
+                        _e0 = getattr(pos, "bench_at_entry", 0.0)
+                        if _sb and _sb.close and _e0:
+                            _sr = q.price / pos.entry_price - 1.0
+                            _br = _sb.close[-1] / _e0 - 1.0
+                        else:
+                            # STATED, not silent. A position opened before
+                            # this field existed cannot be judged on relative
+                            # strength; say so rather than letting an enabled
+                            # check quietly never run.
+                            log.warning("swing %s: RS exit ENABLED but no "
+                                        "benchmark-at-entry recorded — cannot "
+                                        "evaluate it for this position. Price "
+                                        "exits still apply.", ticker)
+                    except Exception:  # noqa: BLE001 — never break an exit
+                        _sr = _br = None
                 _ctx = swing_exit_policy.SwingExitContext.from_price(
                     entry=pos.entry_price,
                     stop=pos.stop_price, r=r,
                     high_water=max(pos.high_water or pos.entry_price, q.price),
                     held_days=held, price=q.price,
-                    atr_now=q.atr, ema20=e20)
+                    atr_now=q.atr, ema20=e20,
+                    stock_return=_sr, bench_return=_br)
                 _new_stop, why, _ = swing_exit_policy.evaluate(_ctx, _cfg)
                 if _new_stop > pos.stop_price:
                     pos.stop_price = _new_stop
