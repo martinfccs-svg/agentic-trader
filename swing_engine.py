@@ -16,6 +16,7 @@ from risk import position_size
 import portfolio_manager
 import loss_cooldown
 import exit_exec
+import swing_exit_policy
 import correlation_manager
 from safety import market_is_open
 from indicators import ema as _ema  # canonical (2026-08-02)
@@ -255,12 +256,33 @@ class SwingRiskEngine:
                 e20 = _ema(closes, 20) if len(closes) >= 20 else None
                 held = _trading_days_since(pos.entry_time)
                 r = (pos.entry_price - (pos.entry_stop or pos.stop_price))
-                why = None
-                if e20 and closes and closes[-1] < e20 and held >= 2:
-                    why = f"ema20(close {closes[-1]:.2f} < {e20:.2f})"
-                elif held >= _V2_TIME_STOP and r > 0 \
-                        and q.price < pos.entry_price + r:
-                    why = f"time({held}d without +1R)"
+
+                # SHARED POLICY (2026-08-04). This block used to implement
+                # swing's exit ladder inline — and it had already drifted from
+                # the backtest, which additionally checked volatility
+                # expansion and ADX decay. The harness was measuring a
+                # strategy this desk does not run. Both now call the same
+                # module, so a sweep result and live behaviour cannot describe
+                # different things.
+                _cfg = swing_exit_policy.SwingExitConfig(
+                    trail_atr=float(os.getenv("SWING_V2_TRAIL_ATR", "0")),
+                    trail_after_r=float(os.getenv("SWING_V2_TRAIL_AFTER_R", "1.0")),
+                    staged_lock=os.getenv("SWING_V2_STAGED_LOCK", "").lower()
+                    in ("on", "true", "1", "yes"),
+                    adx_trail=os.getenv("SWING_V2_ADX_TRAIL", "").lower()
+                    in ("on", "true", "1", "yes"),
+                    vol_exit_mult=float(os.getenv("SWING_V2_VOL_EXIT", "0")),
+                    adx_decay_frac=float(os.getenv("SWING_V2_ADX_DECAY", "0")),
+                    time_stop_days=_V2_TIME_STOP)
+                _ctx = swing_exit_policy.SwingExitContext.from_price(
+                    entry=pos.entry_price,
+                    stop=pos.stop_price, r=r,
+                    high_water=max(pos.high_water or pos.entry_price, q.price),
+                    held_days=held, price=q.price,
+                    atr_now=q.atr, ema20=e20)
+                _new_stop, why, _ = swing_exit_policy.evaluate(_ctx, _cfg)
+                if _new_stop > pos.stop_price:
+                    pos.stop_price = _new_stop
                 if why and market_is_open():
                     # Mechanics live in exit_exec: sell, book, notify, arm the
                     # cooldown, contain failure. The POLICY above (which
