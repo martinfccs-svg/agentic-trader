@@ -65,6 +65,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import swing_exit_policy    # ONE policy: live and replay cannot disagree
+import exit_rules            # ONE source of truth for exit arithmetic
 from swing_v2 import (detect_setup, ema, atr, RISK_PCT, MAX_NOTIONAL_PCT,   # noqa
                       MAX_CONCURRENT, MAX_NEW_PER_DAY, SETUP_EXPIRY_DAYS,
                       TIME_STOP_DAYS, VOL_MULT_B)
@@ -110,13 +112,8 @@ def run_filtered_breakout(all_bars, dates, start_equity, cost):
                 continue
             p["hc"] = max(p["hc"], b["c"])
             a = atr(_bars_upto(all_bars[sym], today, inclusive=True), 14)
-            if a:
-                p["stop"] = max(p["stop"], p["hc"] - 2.0 * a)
-            fill = None
-            if b["o"] <= p["stop"]:
-                fill = b["o"]
-            elif b["l"] <= p["stop"]:
-                fill = p["stop"]
+            p["stop"] = exit_rules.ratchet_stop(p["stop"], p["hc"], a, 2.0)
+            fill, _ = exit_rules.gap_exit(b["o"], p["stop"], b["l"])
             if fill:
                 pnl = p["sh"] * (fill - p["e"]) - p["sh"] * fill * cost
                 equity += pnl
@@ -257,9 +254,16 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
             p["hw"] = max(p.get("hw", p["e"]), b["c"])
 
             # --- adaptive ATR trail: ratchets up only, after TRAIL_AFTER R
-            if TRAIL and atr_now and p["r"] > 0 \
-                    and p["hw"] >= p["e"] + TRAIL_AFTER * p["r"]:
-                p["stop"] = max(p["stop"], p["hw"] - TRAIL * atr_now)
+            # SHARED ARITHMETIC (2026-08-04). These lines used to be a local
+            # copy of the ratchet. Mathematically identical to
+            # exit_rules.ratchet_stop today — which is exactly the problem:
+            # "identical today" is how two implementations start, not how
+            # they stay. The replay must exercise the SAME code the live desk
+            # runs, or the backtest slowly becomes a test of something else.
+            if TRAIL and atr_now and p["r"] > 0:
+                p["stop"] = exit_rules.trail_after_r(
+                    p["e"], p["hw"], p["r"], TRAIL_AFTER, atr_now, TRAIL,
+                    p["stop"])
 
             # --- trail distance chosen by trend strength ---------------
             if ADX_TRAIL and atr_now and p["r"] > 0 \
@@ -269,7 +273,8 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                     _m = exit_rules.adx_trail_mult(
                         _adx_bt([x["h"] for x in hist], [x["l"] for x in hist],
                                 [x["c"] for x in hist], 14))
-                    p["stop"] = max(p["stop"], p["hw"] - _m * atr_now)
+                    p["stop"] = exit_rules.ratchet_stop(
+                        p["stop"], p["hw"], atr_now, _m)
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -282,36 +287,48 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
             if STAGED and atr_now:
                 try:
                     import exit_rules
-                    _s, _ = exit_rules.staged_profit_lock(
+                    p["stop"], _ = exit_rules.staged_profit_lock(
                         p["e"], p["hw"], atr_now, p["stop"], e20)
-                    p["stop"] = max(p["stop"], _s)
                 except Exception:  # noqa: BLE001
                     pass
 
             fill = None; reason = None
-            if b["o"] <= p["stop"]:
-                fill, reason = b["o"], "gap_stop"
-            elif b["l"] <= p["stop"]:
-                fill, reason = p["stop"], "stop"
-            elif not simple_exit and not p["half"] and b["h"] >= p["e"] + 2 * p["r"]:
+            # ---- SHARED POLICY (2026-08-04) ---------------------------
+            # The same module the live desk calls. Previously this block
+            # implemented swing's exit ladder locally, and it had ALREADY
+            # drifted: it checked volatility expansion and ADX decay, which
+            # the live engine did not. The harness was measuring a strategy
+            # the bot does not run.
+            _adx_now = None
+            if ADXD and p.get("adx0", 0) > 0:
+                _adx_now = _adx_bt([x["h"] for x in hist],
+                                   [x["l"] for x in hist],
+                                   [x["c"] for x in hist], 14)
+            _cfg = swing_exit_policy.SwingExitConfig(
+                trail_atr=TRAIL, trail_after_r=TRAIL_AFTER,
+                adx_trail=ADX_TRAIL, staged_lock=STAGED,
+                vol_exit_mult=VOLX, adx_decay_frac=ADXD,
+                time_stop_days=TIME_STOP_DAYS)
+            _ctx = swing_exit_policy.SwingExitContext(
+                entry=p["e"], stop=p["stop"], r=p["r"], high_water=p["hw"],
+                held_days=p["held"], open=b["o"], high=b["h"], low=b["l"],
+                close=b["c"], atr_now=atr_now, atr_at_entry=p.get("atr0"),
+                ema20=e20, adx_now=_adx_now, adx_at_entry=p.get("adx0"))
+            p["stop"], reason, fill = swing_exit_policy.evaluate(_ctx, _cfg)
+
+            # The 2R PARTIAL stays here, and cannot move into the shared
+            # policy: partial exits do not exist live — brokers.sell() closes
+            # whole positions. Modelling one in the policy both desks share
+            # would let the replay measure a trade the bot cannot place. It
+            # is skipped when the stop already fired, matching the original
+            # ordering exactly.
+            if reason not in ("stop", "gap_stop") and not simple_exit \
+                    and not p["half"] and b["h"] >= p["e"] + 2 * p["r"]:
                 px = p["e"] + 2 * p["r"]
                 n = p["sh"] // 2
                 equity += n * (px - p["e"]) - n * px * cost
-                p["sh"] -= n; p["half"] = True; p["stop"] = p["e"]
-            # --- volatility expansion: sized for entry ATR, not this ---
-            if not fill and VOLX and atr_now and p.get("atr0", 0) > 0 \
-                    and atr_now > VOLX * p["atr0"]:
-                fill, reason = b["c"], "vol_expansion"
-            # --- ADX decay: the trend that justified the entry is gone ---
-            if not fill and ADXD and p.get("adx0", 0) > 0:
-                a_now = _adx_bt([x["h"] for x in hist], [x["l"] for x in hist],
-                                [x["c"] for x in hist], 14)
-                if a_now is not None and a_now < ADXD * p["adx0"]:
-                    fill, reason = b["c"], "adx_decay"
-            if not fill and e20 and b["c"] < e20 and p["held"] >= 2:
-                fill, reason = b["c"], "ema20"
-            if not fill and p["held"] >= TIME_STOP_DAYS and b["c"] < p["e"] + p["r"]:
-                fill, reason = b["c"], "time"
+                p["sh"] -= n; p["half"] = True
+                p["stop"] = max(p["stop"], p["e"])
             if fill:
                 pnl = p["sh"] * (fill - p["e"]) - p["sh"] * fill * cost
                 equity += pnl
