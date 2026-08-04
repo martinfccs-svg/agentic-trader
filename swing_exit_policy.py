@@ -59,6 +59,8 @@ class SwingExitConfig:
     staged_lock: bool = False
     vol_exit_mult: float = 0.0      # 0 = off
     adx_decay_frac: float = 0.0     # 0 = off
+    rs_exit_lag: float = 0.0        # 0 = off; e.g. 0.05 = 5pp behind bench
+    rs_exit_min_days: int = 5
     ema20_grace_days: int = 2
     time_stop_days: int = 15
     time_stop_require_r: float = 1.0
@@ -81,6 +83,10 @@ class SwingExitContext:
     ema20: Optional[float] = None
     adx_now: Optional[float] = None
     adx_at_entry: Optional[float] = None
+    # Returns SINCE ENTRY, for the relative-strength exit. Callers compute
+    # them from their own data; the policy only compares.
+    stock_return: Optional[float] = None
+    bench_return: Optional[float] = None
 
     @classmethod
     def from_price(cls, entry, stop, r, high_water, held_days, price,
@@ -140,6 +146,17 @@ def evaluate(ctx: SwingExitContext, cfg: SwingExitConfig
     if cfg.adx_decay_frac > 0 and ctx.adx_at_entry and ctx.adx_now is not None:
         if ctx.adx_now < cfg.adx_decay_frac * ctx.adx_at_entry:
             return stop, "adx_decay", ctx.close
+
+    # ---- 4b. relative strength decay -----------------------------------
+    # Before the trend break on purpose: a name can stop leading the index
+    # while its own trend is still technically intact, and that is precisely
+    # the case price-based exits miss.
+    if cfg.rs_exit_lag > 0:
+        why = exit_rules.relative_strength_exit(
+            ctx.stock_return, ctx.bench_return, cfg.rs_exit_lag,
+            ctx.held_days, cfg.rs_exit_min_days)
+        if why:
+            return stop, "rs_decay", ctx.close
 
     # ---- 5. trend break -------------------------------------------------
     if ctx.held_days >= cfg.ema20_grace_days and \
