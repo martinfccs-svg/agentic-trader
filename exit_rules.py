@@ -114,7 +114,7 @@ def stale_thesis_stop(days_held: int, max_days: int) -> Optional[str]:
 ADX_TRAIL_BANDS = ((35.0, 3.0), (20.0, 2.0), (0.0, 1.5))
 
 
-def adx_trail_mult(adx: Optional[float], default: float = 2.0) -> float:
+def select_atr_trail_band(adx: Optional[float], default: float = 2.0) -> float:
     """ATR multiple chosen by trend STRENGTH, not fixed.
 
         ADX > 35   ->  3.0x   a strong trend has earned room to breathe
@@ -133,6 +133,12 @@ def adx_trail_mult(adx: Optional[float], default: float = 2.0) -> float:
         if adx >= floor:
             return mult
     return default
+
+
+# Renamed from adx_trail_mult (2026-08-04): the old name claimed to trail
+# something, and it does not — it SELECTS the policy parameter a trail then
+# uses. Alias kept so existing call sites keep working.
+adx_trail_mult = select_atr_trail_band
 
 
 def staged_profit_lock(entry: float, high_water: float,
@@ -218,6 +224,47 @@ def rank_exit(rank: Optional[int], exit_rank: int) -> Optional[str]:
         return "no longer ranked"
     if rank > exit_rank:
         return f"rank {rank} > exit band {exit_rank}"
+    return None
+
+
+def gap_exit(open_price: float, stop: float, low: float = None
+             ) -> tuple[Optional[float], Optional[str]]:
+    """(fill_price, reason) when a stop is breached — gap-aware.
+
+    The distinction that matters, and which a naive stop check gets wrong:
+
+        stop = 100, tomorrow OPENS at 94
+
+    You do not exit at 100. You exit at 94, and the extra 6 points of loss
+    are real. Modelling it as a clean 100 understates every gap risk in the
+    book. The backtest has always handled this; the library did not, so any
+    live path doing its own stop arithmetic would have booked the optimistic
+    number.
+
+    Broker-side GTC stops handle gaps naturally — this is for the LOCAL
+    checks (intraday, xsect) and for recording the honest fill.
+    """
+    if stop <= 0:
+        return None, None
+    if open_price <= stop:
+        return open_price, f"gap_stop(open {open_price:.2f} <= {stop:.2f})"
+    if low is not None and low <= stop:
+        return stop, f"stop({stop:.2f} touched intraday)"
+    return None, None
+
+
+def profit_target(price: float, entry: float, r: float,
+                  target_r: float) -> Optional[str]:
+    """Fixed R-multiple objective. Returns a reason or None.
+
+    Lived only inside the backtest as the 2R half-exit; moved here so the
+    live and replay paths can share one definition rather than two that
+    happen to agree today.
+    """
+    if r <= 0 or target_r <= 0:
+        return None
+    if price >= entry + target_r * r:
+        return f"target({target_r:g}R)"
     return None
 
 
