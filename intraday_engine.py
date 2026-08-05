@@ -185,6 +185,19 @@ class IntradayRiskEngine:
                              Action.REJECTED_BY_CONFIRMATION,
                              f"v2 gate: score={card.score:.2f} "
                              f"gates_ok={card.gates_ok}")
+            # THE COST OF THE TIME WINDOW, counted rather than argued
+            # (2026-08-05). Every time this fires, the window alone stopped a
+            # trade that satisfied market state, relative volume, the volume
+            # band AND the score threshold. A week of these makes "drop the
+            # window" an evidence question: rare means it costs nothing to
+            # keep, common means it is doing real work and opening it needs
+            # numbers, not reasoning.
+            if card.window_is_sole_blocker:
+                log.warning("INTRADAY WINDOW-BLOCKED %s [%s]: every other "
+                            "gate passed (score %.2f, mkt/rv/vol all true) — "
+                            "this exclusion alone stopped the trade",
+                            signal.ticker, card.blocked_region or "?",
+                            card.score)
             _log_reject(signal.ticker,
                         "v2 gate score=%.2f (min %.2f) gates[time=%s "
                         "mkt=%s rv=%s vol=%s] (time=trading window "
