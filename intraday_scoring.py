@@ -130,7 +130,10 @@ def excluded_region(now: Optional[datetime] = None) -> Optional[str]:
     deciding about any one of them:
 
         09:30-09:35  the opening auction imbalance unwinding
-        11:15-13:30  THE MIDDAY BREAK — 38% of the tradeable day
+        12:00-13:00  THE MIDDAY BREAK — ~13% of the tradeable day, the
+                     thinnest hour of the session: the European close has
+                     passed, the US lunch is underway, and institutional
+                     flow has not yet resumed for the afternoon
         15:30-16:00  closing auction distortion
 
     Naming the region means a week of logs answers "what does the BREAK
