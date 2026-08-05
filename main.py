@@ -127,7 +127,8 @@ def build():
                     "(warn %.2f / block %.2f) SWING_V2_ROUTE=%s "
                     "SWING_RISK=%.4f PORTFOLIO_HEAT_MAX=%s SECTOR_MAX_PCT=%s "
                     "CONCENTRATION_TOP%d=%s DRAWDOWN_SCALING=%s "
-                    "MAX_PARTICIPATION=%s RANK_SIGNALS=%s BEARTREND=%s "
+                    "DESK_BUDGET=%s MAX_PARTICIPATION=%s RANK_SIGNALS=%s "
+                    "BEARTREND=%s "
                     "| %s",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
                     _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
@@ -136,6 +137,8 @@ def build():
                     _se._swing_risk_pct(),
                     f"{_pm.HEAT_MAX:.1%}" if _pm.HEAT_MAX > 0 else "0 (measure)",
                     f"{_pm.SECTOR_MAX_PCT:.0%}" if _pm.SECTOR_MAX_PCT > 0
+                    else "0 (measure)",
+                    f"{_pm.DESK_BUDGET_PCT:.0%}" if _pm.DESK_BUDGET_PCT > 0
                     else "0 (measure)",
                     _pm.TOP_N,
                     f"{_pm.TOP_N_MAX_PCT:.0%}" if _pm.TOP_N_MAX_PCT > 0
