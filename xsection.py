@@ -45,6 +45,7 @@ from safety import market_is_open
 from scan_health import DailyRebalanceGate
 import regime
 import portfolio_manager
+import exit_exec
 import exit_rules
 from sector_map import sector_of
 import xsect_persistence as xp
@@ -287,23 +288,16 @@ class CrossSectionalMomentumEngine:
             if pos is None:
                 continue
             price = q.price if q and q.price else pos.entry_price
-            try:
-                entry_price = pos.entry_price
-                shares = pos.shares
-                realized = self._broker.sell(ticker, price)
-                self._log.record_close(System.XSECTMOM, realized)
-                if price is not None and realized is not None:
-                    self._notifier.notify_exit(
-                        ticker=ticker, shares=shares, exit_price=price,
-                        entry_price=entry_price, pnl=realized,
-                        system=System.XSECTMOM.value,
-                    )
-                log.warning("xsect rebalance: EXIT %s (past the exit band, "
-                            "rank > %d)", ticker,
-                            xp.exit_rank_threshold(XSECT.top_n))
-            except Exception as e:  # noqa: BLE001 — one exit must not block the rest
-                log.error("xsect rebalance: exit %s failed (retry next "
-                          "rebalance): %s", ticker, e)
+            # Shared MECHANICS (2026-08-05). cooldown_system=None on
+            # purpose: this desk exits on RANK, not because the trade was
+            # wrong. Arming a 5-day per-ticker cooldown here would bench a
+            # name for a week merely because something else out-ranked it —
+            # and the rotation would then be picking from a shrinking pool
+            # for reasons unrelated to momentum.
+            exit_exec.close_position(
+                self._broker, self._log, ticker, price,
+                f"rank>{xp.exit_rank_threshold(XSECT.top_n)}",
+                System.XSECTMOM, self._notifier, None)
 
         # Buy new entrants (kill switch already verified before the exits —
         # rotation atomicity: we only get here if entries are permitted).
@@ -486,18 +480,8 @@ class CrossSectionalMomentumEngine:
             # "quote-est" prices 30 min after the bell. If a stop is genuinely
             # hit during the session, the broker's own leg fills it.
             if q.price <= pos.stop_price and market_is_open():
-                try:
-                    exit_price = q.price
-                    entry_price = pos.entry_price
-                    shares = pos.shares
-                    realized = self._broker.sell(ticker, exit_price)
-                    self._log.record_close(System.XSECTMOM, realized)
-                    if exit_price is not None and realized is not None:
-                        self._notifier.notify_exit(
-                            ticker=ticker, shares=shares,
-                            exit_price=exit_price, entry_price=entry_price,
-                            pnl=realized, system=System.XSECTMOM.value,
-                        )
-                except Exception as e:  # noqa: BLE001
-                    log.error("xsect stop-exit %s failed (will retry next "
-                              "cycle): %s", ticker, e)
+                # A STOP exit, unlike the rank exit above — the trade went
+                # against us, so the cooldown applies.
+                exit_exec.close_position(
+                    self._broker, self._log, ticker, q.price, "stop",
+                    System.XSECTMOM, self._notifier, "xsectmom")
