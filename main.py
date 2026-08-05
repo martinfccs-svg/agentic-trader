@@ -118,6 +118,7 @@ def build():
         import swing_v2 as _sv2
         import swing_engine as _se
         import portfolio_manager as _pm
+        import promotion_registry as _pr
         log.warning("GATES: SWING_ENTRIES=%s INTRADAY_ENTRIES=%s "
                     "INTRADAY_V2_GATE=%s XSECT_SECTOR_CAP=%d "
                     "REGIME_FILTER=%s MEANREV_SCORING=%s "
@@ -126,7 +127,8 @@ def build():
                     "(warn %.2f / block %.2f) SWING_V2_ROUTE=%s "
                     "SWING_RISK=%.4f PORTFOLIO_HEAT_MAX=%s SECTOR_MAX_PCT=%s "
                     "CONCENTRATION_TOP%d=%s DRAWDOWN_SCALING=%s "
-                    "MAX_PARTICIPATION=%s RANK_SIGNALS=%s BEARTREND=%s",
+                    "MAX_PARTICIPATION=%s RANK_SIGNALS=%s BEARTREND=%s "
+                    "| %s",
                     _sw, _ie, _v2, _cap, _rg.ENABLED, _mrs.SCORING_MODE,
                     _mrs.SCORE_MIN, _ra.MODE, _lc.DAYS.get("swing", 0),
                     _cm.MODE, _cm.WARN_CORR, _cm.BLOCK_CORR,
@@ -142,7 +144,13 @@ def build():
                     f"{_pm.MAX_PARTICIPATION:.2%}" if _pm.MAX_PARTICIPATION > 0
                     else "0 (measure)",
                     "on" if RANK_SIGNALS else "off",
-                    __import__("beartrend_scoring").MODE + " (research only)")
+                    __import__("beartrend_scoring").MODE + " (research only)",
+                    _pr.banner())
+        # Full detail on its own lines: which desk took which value, from
+        # where. A setting that changes trading must be READ at boot, never
+        # inferred from a file nobody opened.
+        for _line in _pr.describe():
+            log.warning("%s", _line)
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
