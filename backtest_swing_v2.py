@@ -229,6 +229,7 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
     TRAIL_AFTER = float(exits.get("trail_after_r", 1.0) or 1.0)
     VOLX = float(exits.get("vol_exit", 0) or 0)
     STAGED = bool(exits.get("staged_lock", False))
+    RSX = float(exits.get("rs_exit", 0) or 0)
     ADX_TRAIL = bool(exits.get("adx_trail", False))
     ADXD = float(exits.get("adx_decay", 0) or 0)
     equity = start_equity
@@ -304,16 +305,25 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                 _adx_now = _adx_bt([x["h"] for x in hist],
                                    [x["l"] for x in hist],
                                    [x["c"] for x in hist], 14)
+            # Returns SINCE ENTRY for both the name and the benchmark, so
+            # the policy can judge whether the reason for the trade survived.
+            _sr = _br = None
+            if RSX and p.get("spy0"):
+                _spy = _closes_upto(all_bars.get("SPY", []), today)
+                if _spy:
+                    _sr = b["c"] / p["e"] - 1.0
+                    _br = _spy[-1] / p["spy0"] - 1.0
             _cfg = swing_exit_policy.SwingExitConfig(
                 trail_atr=TRAIL, trail_after_r=TRAIL_AFTER,
                 adx_trail=ADX_TRAIL, staged_lock=STAGED,
                 vol_exit_mult=VOLX, adx_decay_frac=ADXD,
-                time_stop_days=TIME_STOP_DAYS)
+                rs_exit_lag=RSX, time_stop_days=TIME_STOP_DAYS)
             _ctx = swing_exit_policy.SwingExitContext(
                 entry=p["e"], stop=p["stop"], r=p["r"], high_water=p["hw"],
                 held_days=p["held"], open=b["o"], high=b["h"], low=b["l"],
                 close=b["c"], atr_now=atr_now, atr_at_entry=p.get("atr0"),
-                ema20=e20, adx_now=_adx_now, adx_at_entry=p.get("adx0"))
+                ema20=e20, adx_now=_adx_now, adx_at_entry=p.get("adx0"),
+                stock_return=_sr, bench_return=_br)
             p["stop"], reason, fill = swing_exit_policy.evaluate(_ctx, _cfg)
 
             # The 2R PARTIAL stays here, and cannot move into the shared
@@ -384,7 +394,10 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                 positions[sym] = {"e": entry_px, "stop": stop, "r": dist,
                                   "sh": sh, "half": False, "held": 0,
                                   "hw": entry_px, "atr0": s.atr14,
-                                  "adx0": getattr(s, "adx_at_setup", 0.0)}
+                                  "adx0": getattr(s, "adx_at_setup", 0.0),
+                                  "spy0": (_closes_upto(
+                                      all_bars.get("SPY", []), today) or
+                                      [None])[-1]}
                 entries_today += 1
                 del setups[sym]
         # 4) mark equity
@@ -510,6 +523,7 @@ EXIT_VARIANTS = [
     ("+ ADX decay",  {"adx_decay": 0.6}),
     ("+ staged lock", {"staged_lock": True}),
     ("+ ADX trail",   {"adx_trail": True}),
+    ("+ RS decay",    {"rs_exit": 0.05}),
 ]
 
 
@@ -704,6 +718,7 @@ WF_CANDIDATES = [
     ("ADX decay",   {"adx_decay": 0.6}),
     ("staged lock", {"staged_lock": True}),
     ("ADX trail",   {"adx_trail": True}),
+    ("RS decay",    {"rs_exit": 0.05}),
 ]
 
 
