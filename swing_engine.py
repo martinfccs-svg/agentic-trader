@@ -340,20 +340,7 @@ class SwingRiskEngine:
             # "quote-est" prices 30 min after the bell. If a stop is genuinely
             # hit during the session, the broker's own leg fills it.
             if q.price <= pos.stop_price and market_is_open():
-                try:
-                    exit_price = q.price
-                    entry_price = pos.entry_price
-                    shares = pos.shares
-                    realized = self._broker.sell(ticker, exit_price)
-                    self._log.record_close(System.SWING, realized)
-                    if realized is not None and realized < 0:
-                        loss_cooldown.note_loss("swing", ticker)
-                    if exit_price is not None and realized is not None:
-                        self._notifier.notify_exit(
-                            ticker=ticker, shares=shares,
-                            exit_price=exit_price, entry_price=entry_price,
-                            pnl=realized, system=System.SWING.value,
-                        )
-                except Exception as e:  # noqa: BLE001 — one exit must not kill the loop
-                    log.error("swing stop-exit %s failed (retry next cycle): %s",
-                              ticker, e)
+                # Shared mechanics — the last inline exit in this desk.
+                exit_exec.close_position(
+                    self._broker, self._log, ticker, q.price, "stop",
+                    System.SWING, self._notifier, "swing")
