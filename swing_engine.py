@@ -14,6 +14,7 @@ from config import MIN_DOLLAR_VOL, MIN_PRICE, SWING
 from models import Action, Signal, System
 from risk import position_size
 import portfolio_manager
+import position_sizing
 import loss_cooldown
 import exit_exec
 import swing_exit_policy
@@ -154,7 +155,11 @@ class SwingRiskEngine:
         # capped 1% figure gives 43.45 x 0.75 = 32.59 — a 25% under-size that
         # would NOT match the backtest, which applies risk% and the cap in
         # this same order.
-        _risk = _swing_risk_pct()
+        # Per-desk risk now lives in position_sizing, so the next desk that
+        # needs a non-default figure reads the same table instead of copying
+        # this helper — the pattern that produced four ATR trails.
+        _risk = position_sizing.risk_pct(
+            "swing", "v2" if _V2_ROUTE else None)
         if abs(_risk - _ENGINE_RISK) > 1e-12:
             try:
                 from config import max_position_dollars
@@ -162,13 +167,17 @@ class SwingRiskEngine:
                 if _dist > 0:
                     _cash = getattr(self._broker, "cash", 1e12)
                     _before = shares
-                    shares = min(self._broker.equity * _risk / _dist,
-                                 max_position_dollars(self._broker.equity)
-                                 / q.price,
-                                 _cash / q.price)
-                    log.info("swing risk %.4f (engine default %.4f): "
-                             "%.2f -> %.2f shares", _risk, _ENGINE_RISK,
-                             _before, shares)
+                    shares = position_sizing.desired_shares(
+                        self._broker.equity, q.price, stop, "swing",
+                        cash=_cash,
+                        routed_variant="v2" if _V2_ROUTE else None)
+                    log.info("swing sizing: %s (was %.2f shares at the "
+                             "engine default)",
+                             position_sizing.explain(
+                                 self._broker.equity, q.price, stop, "swing",
+                                 cash=_cash,
+                                 routed_variant="v2" if _V2_ROUTE else None),
+                             _before)
             except Exception as e:  # noqa: BLE001 — never break sizing
                 log.error("swing per-desk risk failed (%s) — using the "
                           "engine's own size", e)
