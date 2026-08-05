@@ -28,6 +28,7 @@ from __future__ import annotations
 import difflib
 import logging
 import os
+import re
 
 log = logging.getLogger("config_check")
 
@@ -49,7 +50,8 @@ KNOWN = {
     "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR", "DESK_BUDGET_PCT",
     "DRAWDOWN_SCALING", "DRAWDOWN_STATE_PATH", "ENABLED_SYSTEMS",
     "ENTRY_SETTLE_GRACE_SECS", "FINNHUB_API_KEY", "FLATTEN_BEFORE_CLOSE_MIN",
-    "INTRADAY_ATR_MULT", "INTRADAY_COOLDOWN_MIN", "INTRADAY_ENTRIES",
+    "INTRADAY_ATR_MULT", "INTRADAY_BREAK_END", "INTRADAY_BREAK_START",
+    "INTRADAY_SESSION_CLOSE", "INTRADAY_SESSION_OPEN", "INTRADAY_COOLDOWN_MIN", "INTRADAY_ENTRIES",
     "INTRADAY_LOOKBACK_MIN", "INTRADAY_MAX_POS", "INTRADAY_REQUIRE_VWAP",
     "INTRADAY_RESOLUTION", "INTRADAY_RV_GATE", "INTRADAY_SCORE_MIN",
     "INTRADAY_TRAIL_PCT", "INTRADAY_UNIVERSE", "INTRADAY_V2_GATE",
@@ -273,6 +275,29 @@ def validate() -> tuple[int, int]:
         warns.append("SWING_V2_MODE=live is REFUSED in code (v2 orders would "
                      "orphan at reconcile). Use SWING_V2_ROUTE=on to route "
                      "its signals through swing_engine instead.")
+
+    # The intraday break is now configurable, so a fat-fingered HH:MM can
+    # silently widen or delete it. The module already reverts to defaults on
+    # a nonsense schedule; say so here too, at boot, where it is read.
+    for _v in ("INTRADAY_BREAK_START", "INTRADAY_BREAK_END",
+               "INTRADAY_SESSION_OPEN", "INTRADAY_SESSION_CLOSE"):
+        _raw = os.getenv(_v, "").strip()
+        if _raw and not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", _raw):
+            errors.append(f"{_v}={_raw!r} is not HH:MM — intraday will fall "
+                          f"back to its default schedule and this setting "
+                          f"will do NOTHING.")
+    try:
+        import intraday_scoring as _isc
+        _b = ((_isc.BREAK_END_ET[0] * 60 + _isc.BREAK_END_ET[1])
+              - (_isc.BREAK_START_ET[0] * 60 + _isc.BREAK_START_ET[1]))
+        infos.append(f"INTRADAY schedule: trades "
+                     f"{_isc.SESSION_OPEN_ET[0]:02d}:{_isc.SESSION_OPEN_ET[1]:02d}"
+                     f"-{_isc.SESSION_CLOSE_ET[0]:02d}:{_isc.SESSION_CLOSE_ET[1]:02d} ET "
+                     f"with a {_b}-minute break "
+                     f"{_isc.BREAK_START_ET[0]:02d}:{_isc.BREAK_START_ET[1]:02d}"
+                     f"-{_isc.BREAK_END_ET[0]:02d}:{_isc.BREAK_END_ET[1]:02d}")
+    except Exception:  # noqa: BLE001
+        pass
 
     look = _num("DAILY_LOOKBACK_DAYS")
     floor = _num("MIN_DAILY_LOOKBACK_CALENDAR_DAYS") or 500
