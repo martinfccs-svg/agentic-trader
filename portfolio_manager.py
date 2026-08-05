@@ -64,6 +64,18 @@ SECTOR_MAX_PCT = float(os.getenv("SECTOR_MAX_PCT", "0"))
 # positions each at a perfectly legal 9% is 45% of the book in five names,
 # and no gate in this system noticed. Measured against equity, not against
 # invested capital, so cash held is not mistaken for diversification.
+# DESK BUDGET (2026-08-05). regime_allocation answers "how aggressive should
+# each desk be?" — a multiplier on each POSITION. Nothing answered "how much
+# of the book may this desk hold in AGGREGATE", so the four desks could
+# collectively commit 150% of equity (4+4+4+3 positions x a 10% cap) and
+# whichever signalled first took the cash. That is the same first-come
+# problem RANK_SIGNALS fixed WITHIN a desk, unfixed ACROSS desks.
+#
+# Equal budgets when enabled, deliberately: weighting desks by expected
+# return needs per-desk track records, and there are ~11 closed trades. An
+# unequal split today would be a guess wearing an allocation's clothes.
+DESK_BUDGET_PCT = float(os.getenv("DESK_BUDGET_PCT", "0"))   # 0 = measure
+
 TOP_N = int(os.getenv("CONCENTRATION_TOP_N", "5"))
 TOP_N_MAX_PCT = float(os.getenv("CONCENTRATION_TOP_N_MAX", "0"))   # 0 = measure
 
@@ -187,6 +199,21 @@ def _adv_dollars(feed, ticker: str, days: int = 20) -> float | None:
         return sum(c[-n:][i] * v[-n:][i] for i in range(n)) / n
     except Exception:  # noqa: BLE001
         return None
+
+
+def _desk_exposure(broker, equity: float) -> dict:
+    """{desk: fraction of equity} from current holdings, by owning system."""
+    out: dict[str, float] = {}
+    if equity <= 0:
+        return out
+    for t, p in (getattr(broker, "positions", {}) or {}).items():
+        try:
+            price = getattr(p, "last_price", None) or p.entry_price
+            desk = getattr(getattr(p, "system", None), "value", None) or "?"
+            out[desk] = out.get(desk, 0.0) + (price * p.shares) / equity
+        except Exception:  # noqa: BLE001 — one bad position must not blind us
+            continue
+    return out
 
 
 def _sector_exposure(broker, equity: float) -> dict:
@@ -329,6 +356,37 @@ def evaluate(shares: float, feed, broker, ticker: str, system,
                    f"top{TOP_N} {would:.1%} measure-only")
     except Exception as e:  # noqa: BLE001
         log.error("portfolio: concentration failed (%s) — failing open", e)
+
+    # ---- 2bb. DESK BUDGET ----------------------------------------------
+    # Not a new layer: this is the same question as heat, sector and
+    # concentration — "can the book afford it?" — asked per desk. Putting it
+    # here keeps ONE decision point rather than adding a fourth module that
+    # touches sizing.
+    try:
+        desks = _desk_exposure(broker, equity)
+        have_d = desks.get(tag, 0.0)
+        adding_d = (d.shares_out * price) / equity if equity > 0 else 0.0
+        if DESK_BUDGET_PCT > 0:
+            room = DESK_BUDGET_PCT - have_d
+            if room <= 0:
+                d.shares_out = 0.0
+                d.note("desk_budget", REJECT,
+                       f"{tag} at {have_d:.1%} >= {DESK_BUDGET_PCT:.1%}")
+                log.warning("PORTFOLIO %s", d.line())
+                return d
+            if adding_d > room:
+                d.shares_out = (room * equity) / price
+                d.note("desk_budget", REDUCE,
+                       f"{tag} {have_d:.1%}+{adding_d:.1%} > "
+                       f"{DESK_BUDGET_PCT:.1%}, trimmed to fit")
+            else:
+                d.note("desk_budget", ACCEPT,
+                       f"{tag} {have_d:.1%}+{adding_d:.1%}")
+        else:
+            d.note("desk_budget", ACCEPT,
+                   f"{tag} {have_d:.1%}+{adding_d:.1%} measure-only")
+    except Exception as e:  # noqa: BLE001
+        log.error("portfolio: desk budget failed (%s) — failing open", e)
 
     # ---- 2c. LIQUIDITY (participation vs average daily dollar volume) ---
     try:
