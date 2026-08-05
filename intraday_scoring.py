@@ -53,6 +53,7 @@ Env:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -68,7 +69,82 @@ RV_GATE = float(os.getenv("INTRADAY_RV_GATE", "2.0"))
 COOLDOWN_MIN = int(os.getenv("INTRADAY_COOLDOWN_MIN", "45"))
 ATR_PCT_MIN, ATR_PCT_MAX = 0.0010, 0.015   # intraday scale, corrected
 
-WINDOWS_ET = (((9, 35), (11, 15)), ((13, 30), (15, 30)))
+# SESSION AND MIDDAY BREAK (2026-08-05)
+#
+# The break was 11:15-13:30 — 135 minutes, 38% of the tradeable day. Narrowed
+# to ONE HOUR, defaulting to 12:00-13:00 ET because that is the thinnest hour
+# of the US session: the European close has passed, the US lunch is underway,
+# and institutional flow has not yet resumed for the afternoon. Keeping the
+# worst hour excluded while restoring the 75 minutes on either side.
+#
+# Configurable rather than hardcoded, so this is a setting that can be tuned
+# or reverted from Railway instead of a redeploy — and so config_check can
+# range-check it.
+#
+# WHY A BREAK AT ALL, still: relative volume is a TRAILING 20-bar ratio, so
+# during lunch its own baseline is lunch. A 2.2x "surge" at 12:30 is ~55k
+# shares/min against ~162k in a QUIET minute at the open — it passes the rv
+# gate on a third of the liquidity. No other gate sees absolute tape depth,
+# which is why the break cannot simply be deleted.
+_log = logging.getLogger("intraday_scoring")
+
+
+def _hm(env: str, default: tuple) -> tuple:
+    raw = os.getenv(env, "").strip()
+    if not raw:
+        return default
+    try:
+        h, m = raw.split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return (h, m)
+    except (ValueError, AttributeError):
+        pass
+    _log.error("intraday: %s=%r is not HH:MM — using %02d:%02d",
+               env, raw, *default)
+    return default
+
+
+SESSION_OPEN_ET = _hm("INTRADAY_SESSION_OPEN", (9, 35))
+BREAK_START_ET = _hm("INTRADAY_BREAK_START", (12, 0))
+BREAK_END_ET = _hm("INTRADAY_BREAK_END", (13, 0))
+SESSION_CLOSE_ET = _hm("INTRADAY_SESSION_CLOSE", (15, 30))
+
+if not (SESSION_OPEN_ET < BREAK_START_ET < BREAK_END_ET < SESSION_CLOSE_ET):
+    _log.error("intraday: break %s-%s does not sit inside session %s-%s — "
+               "reverting to defaults so the desk cannot trade a nonsense "
+               "schedule", BREAK_START_ET, BREAK_END_ET, SESSION_OPEN_ET,
+               SESSION_CLOSE_ET)
+    SESSION_OPEN_ET, BREAK_START_ET = (9, 35), (12, 0)
+    BREAK_END_ET, SESSION_CLOSE_ET = (13, 0), (15, 30)
+
+WINDOWS_ET = ((SESSION_OPEN_ET, BREAK_START_ET),
+              (BREAK_END_ET, SESSION_CLOSE_ET))
+
+
+def excluded_region(now: Optional[datetime] = None) -> Optional[str]:
+    """WHICH exclusion is blocking, or None if inside a window.
+
+    "Out of window" covers three different regions with three different
+    reasons, and lumping them together makes the live evidence useless for
+    deciding about any one of them:
+
+        09:30-09:35  the opening auction imbalance unwinding
+        11:15-13:30  THE MIDDAY BREAK — 38% of the tradeable day
+        15:30-16:00  closing auction distortion
+
+    Naming the region means a week of logs answers "what does the BREAK
+    cost?" rather than "what does being out of window cost?".
+    """
+    n = now or datetime.now(ET)
+    hm = (n.hour, n.minute)
+    if hm < SESSION_OPEN_ET:
+        return "pre_open"
+    if BREAK_START_ET <= hm < BREAK_END_ET:
+        return "midday_break"
+    if hm >= SESSION_CLOSE_ET:
+        return "closing"
+    return None
 
 
 def in_trading_window(now: Optional[datetime] = None) -> bool:
@@ -112,6 +188,31 @@ class IntradayCard:
     def gates_ok(self) -> bool:
         return (self.gate_window and self.gate_market and self.gate_rv
                 and self.gate_volband)
+
+    @property
+    def window_is_sole_blocker(self) -> bool:
+        """Would this trade have been taken if the TIME WINDOW did not exist?
+
+        Added 2026-08-05 to make a live question answerable from logs instead
+        of argument: "the other criteria already cover it, so drop the
+        window." They may not — relative volume is a TRAILING 20-bar ratio, so
+        during lunch its baseline is also lunch. A 2.2x lunch 'surge' is ~55k
+        shares/min against ~162k in a QUIET minute at the open: it passes the
+        rv gate on a third of the liquidity, because rv measures a CHANGE in
+        activity rather than a LEVEL.
+
+        Counting how often the window is the ONLY failing gate settles the
+        cost side empirically. If it is rare, removing it changes little and
+        the debate is moot. If it is common, the window is doing real work
+        and opening it needs evidence, not reasoning.
+        """
+        return (not self.gate_window and self.gate_market and self.gate_rv
+                and self.gate_volband and self.score >= SCORE_MIN)
+
+    @property
+    def blocked_region(self) -> Optional[str]:
+        """Which exclusion stopped it — so the evidence names the region."""
+        return excluded_region() if not self.gate_window else None
 
     def qualifies(self, score_min: float = SCORE_MIN) -> bool:
         return self.gates_ok and self.score >= score_min
