@@ -46,7 +46,7 @@ KNOWN = {
     "COMMISSION_PER_TRADE", "CONCENTRATION_TOP_N", "CONCENTRATION_TOP_N_MAX",
     "CORRELATION_BLOCK", "CORRELATION_LOOKBACK", "CORRELATION_MIN_OBS",
     "CORRELATION_MODE", "CORRELATION_WARN", "DAILY_BARS_REFRESH_CYCLES",
-    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR",
+    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR", "DESK_BUDGET_PCT",
     "DRAWDOWN_SCALING", "DRAWDOWN_STATE_PATH", "ENABLED_SYSTEMS",
     "ENTRY_SETTLE_GRACE_SECS", "FINNHUB_API_KEY", "FLATTEN_BEFORE_CLOSE_MIN",
     "INTRADAY_ATR_MULT", "INTRADAY_COOLDOWN_MIN", "INTRADAY_ENTRIES",
@@ -131,6 +131,7 @@ RANGES = {
     "PORTFOLIO_HEAT_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "PORTFOLIO_HEAT_TAPER": (0.0, 1.0, "fraction; 0 = off"),
     "SECTOR_MAX_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
+    "DESK_BUDGET_PCT": (0.0, 1.0, "fraction of equity PER DESK; 0 = MEASURE ONLY"),
     "CONCENTRATION_TOP_N_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "MAX_PARTICIPATION_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "CORRELATION_WARN": (0.0, 1.0, "correlation coefficient"),
@@ -241,6 +242,21 @@ def validate() -> tuple[int, int]:
         errors.append(f"PORTFOLIO_HEAT_TAPER={taper} >= PORTFOLIO_HEAT_MAX="
                       f"{hmax} — tapering would start at or after the halt.")
 
+    db = _num("DESK_BUDGET_PCT")
+    if db and db > 0:
+        n_desks = len([d for d in (os.getenv("ENABLED_SYSTEMS") or
+                                   "swing,intraday,meanrev,xsectmom").split(",")
+                       if d.strip()])
+        if db * n_desks < 0.5:
+            warns.append(f"DESK_BUDGET_PCT={db:.0%} x {n_desks} desks = "
+                         f"{db*n_desks:.0%} of equity — the book cannot get "
+                         f"meaningfully invested. Intended?")
+        if db * n_desks > 1.5:
+            infos.append(f"DESK_BUDGET_PCT={db:.0%} x {n_desks} desks = "
+                         f"{db*n_desks:.0%} — budgets overlap, so cash still "
+                         f"binds first. That is fine, but the budget is not "
+                         f"the constraint you think it is.")
+
     warn_c, block_c = _num("CORRELATION_WARN"), _num("CORRELATION_BLOCK")
     if warn_c and block_c and warn_c > block_c:
         errors.append(f"CORRELATION_WARN={warn_c} > CORRELATION_BLOCK="
@@ -274,10 +290,26 @@ def validate() -> tuple[int, int]:
                 infos.append(f"{sysname} is in ENABLED_SYSTEMS but {gate} is "
                              f"off — it will scan and log, not trade.")
 
+    # ---- promotion registry: what is approved, and is anything using it? -
+    try:
+        import promotion_registry as _pr
+        _desks = [d for d in _pr.SCHEMA if _pr.load(d)]
+        if _desks:
+            infos.append("PROMOTION artifacts loaded for: " + ", ".join(
+                f"{d} ({_pr._source.get(d, '?')})" for d in _desks))
+        else:
+            infos.append("PROMOTION: no approved artifacts — every desk is "
+                         "running code defaults and environment variables. "
+                         "Expected until research promotes something.")
+    except Exception as e:  # noqa: BLE001 — a validator must never block boot
+        warns.append(f"promotion registry unreadable ({e}) — desks will use "
+                     f"code defaults")
+
     # ---- measure-only inventory, so nothing is assumed live -------------
     measure = []
     for name, label in (("PORTFOLIO_HEAT_MAX", "portfolio heat"),
                         ("SECTOR_MAX_PCT", "sector budget"),
+                        ("DESK_BUDGET_PCT", "desk capital budget"),
                         ("CONCENTRATION_TOP_N_MAX", "top-N concentration"),
                         ("MAX_PARTICIPATION_PCT", "liquidity participation")):
         v = _num(name)
