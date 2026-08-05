@@ -138,12 +138,18 @@ def build():
                     f"{_pm.HEAT_MAX:.1%}" if _pm.HEAT_MAX > 0 else "0 (measure)",
                     f"{_pm.SECTOR_MAX_PCT:.0%}" if _pm.SECTOR_MAX_PCT > 0
                     else "0 (measure)",
-                    f"{_pm.DESK_BUDGET_PCT:.0%}" if _pm.DESK_BUDGET_PCT > 0
-                    else "0 (measure)",
                     _pm.TOP_N,
                     f"{_pm.TOP_N_MAX_PCT:.0%}" if _pm.TOP_N_MAX_PCT > 0
                     else "0 (measure)",
                     _pm.DD_SCALE,
+                    # DESK_BUDGET sits HERE because that is where its %s sits
+                    # in the format string. Inserting it earlier shifted every
+                    # later argument by one, which fed a string to the %d for
+                    # CONCENTRATION_TOP. The count still matched (24/24), so
+                    # the arity check passed while the ORDER was wrong —
+                    # matching counts prove nothing about alignment.
+                    f"{_pm.DESK_BUDGET_PCT:.0%}" if _pm.DESK_BUDGET_PCT > 0
+                    else "0 (measure)",
                     f"{_pm.MAX_PARTICIPATION:.2%}" if _pm.MAX_PARTICIPATION > 0
                     else "0 (measure)",
                     "on" if RANK_SIGNALS else "off",
