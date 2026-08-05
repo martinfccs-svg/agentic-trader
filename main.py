@@ -481,12 +481,20 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
                 _reg = f" regime={_st.label}/{_st.confidence:.0f}%"
         except Exception:  # noqa: BLE001
             pass
-        log.warning("CYCLE %d HEALTH %.2fs | signals %d routed %d failed %d "
-                    "quarantined %d | positions %d equity=%.2f%s%s",
-                    n, time.time() - _cycle_t0, _health["scanned"],
-                    _health["routed"], _health["failed"],
-                    _health["quarantined"], len(broker.positions),
-                    broker.equity, _hb, _reg)
+        # LEVEL BY CONTENT (2026-08-05). This was log.warning unconditionally,
+        # so Railway flagged EVERY cycle as an error — 122 of 123 "errors" in
+        # a 22-minute window were this line. A monitor that cries wolf on
+        # every heartbeat is worse than no monitor: the one real failure is
+        # buried in the noise. WARNING only when something actually went
+        # wrong; INFO otherwise.
+        _degraded = (_health["failed"] or _health["quarantined"])
+        (log.warning if _degraded else log.info)(
+            "CYCLE %d HEALTH %.2fs | signals %d routed %d failed %d "
+            "quarantined %d | positions %d equity=%.2f%s%s",
+            n, time.time() - _cycle_t0, _health["scanned"],
+            _health["routed"], _health["failed"],
+            _health["quarantined"], len(broker.positions),
+            broker.equity, _hb, _reg)
     except Exception as e:  # noqa: BLE001 — telemetry must never break a cycle
         log.error("cycle health line failed (non-fatal): %s", e)
 
