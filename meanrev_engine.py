@@ -17,6 +17,7 @@ from indicators import rsi
 import meanrev_scoring as mrs
 import portfolio_risk
 import portfolio_manager
+import exit_exec
 import correlation_manager
 from models import Action, Signal, System
 from risk import position_size
@@ -208,21 +209,16 @@ class MeanReversionEngine:
                     log.warning("meanrev LADDER exit %s: reason=%s held=%dd "
                                 "px=%.2f stop=%.2f", ticker, ladder_reason,
                                 held, q.price, pos.stop_price)
-                    try:
-                        exit_price = q.price
-                        entry_price = pos.entry_price
-                        shares = pos.shares
-                        realized = self._broker.sell(ticker, exit_price)
-                        self._log.record_close(System.MEANREV, realized)
-                        if exit_price is not None and realized is not None:
-                            self._notifier.notify_exit(
-                                ticker=ticker, shares=shares,
-                                exit_price=exit_price,
-                                entry_price=entry_price, pnl=realized,
-                                system=System.MEANREV.value)
-                    except Exception as e:  # noqa: BLE001
-                        log.error("meanrev ladder exit %s failed (retry "
-                                  "next cycle): %s", ticker, e)
+                    # Shared MECHANICS (2026-08-05). This block hand-rolled
+                    # what exit_exec owns — and differed from it in one way
+                    # that mattered: it never armed the loss cooldown, so a
+                    # meanrev stop-out could be re-entered the next cycle
+                    # while swing's equivalent was benched for 5 days. The
+                    # LADDER above stays here; it is this desk's policy.
+                    exit_exec.close_position(
+                        self._broker, self._log, ticker, q.price,
+                        ladder_reason, System.MEANREV, self._notifier,
+                        "meanrev")
                 continue   # ladder owns this position; skip legacy exit
             # Exit reasons in priority order, RECORDED (2026-07-22): the old
             # combined boolean made a reverted winner, a stopped loser, and
@@ -246,18 +242,6 @@ class MeanReversionEngine:
                 log.warning("meanrev exit %s: reason=%s held=%dd px=%.2f "
                             "stop=%.2f", ticker, reason, held, q.price,
                             pos.stop_price)
-                try:
-                    exit_price = q.price
-                    entry_price = pos.entry_price
-                    shares = pos.shares
-                    realized = self._broker.sell(ticker, exit_price)
-                    self._log.record_close(System.MEANREV, realized)
-                    if exit_price is not None and realized is not None:
-                        self._notifier.notify_exit(
-                            ticker=ticker, shares=shares,
-                            exit_price=exit_price, entry_price=entry_price,
-                            pnl=realized, system=System.MEANREV.value,
-                        )
-                except Exception as e:  # noqa: BLE001
-                    log.error("meanrev exit %s failed (retry next cycle): %s",
-                              ticker, e)
+                exit_exec.close_position(
+                    self._broker, self._log, ticker, q.price, reason,
+                    System.MEANREV, self._notifier, "meanrev")
