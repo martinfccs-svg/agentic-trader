@@ -25,6 +25,7 @@ Severity:
 
 from __future__ import annotations
 
+import ast
 import difflib
 import logging
 import os
@@ -65,7 +66,8 @@ KNOWN = {
     "MIN_DOLLAR_VOL", "MIN_PRICE", "MR_ATR_MULT", "MR_MAX_POS",
     "MR_RSI_EXIT", "MR_RSI_OVERSOLD", "MR_RSI_PERIOD", "MR_TREND_SMA",
     "NTFY_TOPIC", "OPENING_RANGE_MIN", "PORTFOLIO_HEAT_LOG",
-    "PORTFOLIO_HEAT_MAX", "PORTFOLIO_HEAT_TAPER", "POSITION_STATE_PATH",
+    "PORTFOLIO_HEAT_MAX", "PORTFOLIO_HEAT_TAPER", "POSITION_STATE_PATH", "PROMOTION_DIR", "QUARANTINE_FAILURES",
+    "QUARANTINE_MINUTES",
     "RANK_SIGNALS", "RATE_LIMIT_CALLS", "REGIME_ADX_MIN", "REGIME_ALLOC",
     "REGIME_ALLOC_CONF_BLEND", "REGIME_ALLOC_FAIL_TTL_SECS",
     "REGIME_ALLOC_FLOOR", "REGIME_ALLOC_TTL_SECS", "REGIME_FAIL_TTL_SECS",
@@ -144,6 +146,8 @@ RANGES = {
     "REGIME_ADX_MIN": (0, 100, "ADX is 0-100"),
     "SWING_V2_ADX_MIN": (0, 100, "ADX is 0-100"),
     "XSECT_SECTOR_CAP": (0, 10, "names per sector; 0 = uncapped"),
+    "QUARANTINE_FAILURES": (1, 20, "routing failures before a ticker is benched"),
+    "QUARANTINE_MINUTES": (1, 240, "minutes benched"),
     "SWING_MAX_POS": (1, 20, None),
     "INTRADAY_MAX_POS": (1, 20, None),
     "MR_MAX_POS": (1, 20, None),
@@ -176,6 +180,60 @@ def _num(name):
         return float(v)
     except ValueError:
         return "NaN"
+
+
+def audit_known(repo_files: list = None) -> list:
+    """Which variables does the DEPLOYED code read that KNOWN does not list?
+
+    The validator's whole value is telling you a setting does nothing. That
+    only works if KNOWN is complete — and KNOWN is hand-maintained, so it
+    drifts the moment a module adds a variable and nobody updates it here.
+    Three had already slipped through (PROMOTION_DIR, QUARANTINE_FAILURES,
+    QUARANTINE_MINUTES) before this check existed.
+
+    Deliberately scoped to the LIVE import graph. Local tools and archived
+    code read variables that production never sees, and listing those would
+    make KNOWN claim authority over settings it does not govern.
+    """
+    import os as _os
+    import re as _re
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    if repo_files is None:
+        try:
+            # Walk main.py's imports from SOURCE — no `import main` needed.
+            # Importing it to decide whether to audit would make the audit
+            # silently skip in any environment where main cannot import,
+            # which is exactly where a stale KNOWN would go unnoticed.
+            seen, todo = set(), ["main"]
+            local = {f[:-3] for f in _os.listdir(here) if f.endswith(".py")}
+            while todo:
+                mod = todo.pop()
+                path = _os.path.join(here, mod + ".py")
+                if mod in seen or not _os.path.exists(path):
+                    continue
+                seen.add(mod)
+                tree = ast.parse(open(path, encoding="utf-8").read())
+                for n in ast.walk(tree):
+                    if isinstance(n, ast.Import):
+                        todo += [a.name.split(".")[0] for a in n.names
+                                 if a.name.split(".")[0] in local]
+                    elif isinstance(n, ast.ImportFrom) and n.module:
+                        if n.module.split(".")[0] in local:
+                            todo.append(n.module.split(".")[0])
+            repo_files = [_os.path.join(here, m + ".py") for m in seen]
+        except Exception:  # noqa: BLE001
+            return []
+    read = set()
+    pat = _re.compile(r'(?:getenv|environ\.get)\(\s*["\']([A-Z_0-9]+)["\']')
+    for p in repo_files:
+        try:
+            src = open(p, encoding="utf-8").read()
+        except OSError:
+            continue
+        read |= set(pat.findall(src))
+        read |= set(_re.findall(r'_[fisb]\(\s*["\']([A-Z_0-9]+)["\']', src))
+    return sorted(read - KNOWN - set(ALIASES) - set(DEAD)
+                  - {"RAILWAY_DEPLOYMENT_ID"})
 
 
 def validate() -> tuple[int, int]:
@@ -314,6 +372,17 @@ def validate() -> tuple[int, int]:
                     os.getenv(gate, "true").strip().lower() not in _TRUE:
                 infos.append(f"{sysname} is in ENABLED_SYSTEMS but {gate} is "
                              f"off — it will scan and log, not trade.")
+
+    # ---- does the validator still know every LIVE variable? -------------
+    try:
+        _unknown = audit_known()
+        if _unknown:
+            warns.append("config_check does not know these variables that "
+                         "live code READS: " + ", ".join(_unknown)
+                         + " — they cannot be range-checked or typo-detected "
+                           "until they are added to KNOWN.")
+    except Exception:  # noqa: BLE001 — a self-audit must never block boot
+        pass
 
     # ---- promotion registry: what is approved, and is anything using it? -
     try:
