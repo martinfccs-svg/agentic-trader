@@ -384,6 +384,18 @@ def validate() -> tuple[int, int]:
     except Exception:  # noqa: BLE001 — a self-audit must never block boot
         pass
 
+    # ---- can the registry CARRY everything the sweep can promote? -------
+    try:
+        import promotion_registry as _prs
+        _gap = _prs.audit_schema()
+        if _gap.get("missing_from_schema"):
+            warns.append("promotion registry cannot carry these swing exit "
+                         "options: " + ", ".join(_gap["missing_from_schema"])
+                         + " — if research promotes one it will be silently "
+                           "DROPPED. Add it to promotion_registry.SCHEMA.")
+    except Exception:  # noqa: BLE001
+        pass
+
     # ---- promotion registry: what is approved, and is anything using it? -
     try:
         import promotion_registry as _pr
