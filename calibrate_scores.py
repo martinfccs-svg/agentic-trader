@@ -95,6 +95,29 @@ FEATURES = ("adx", "vol_ratio", "setup_age_days", "risk_per_share",
             "atr14", "risk_pct")
 
 
+def _cliffs_delta(top, bottom):
+    """Non-parametric effect size: P(top > bottom) - P(bottom > top).
+
+    Cohen's d divides by a pooled standard deviation, which assumes the two
+    groups are roughly normal. R-multiples are not — a trend strategy earns
+    its return from a handful of large winners, so the distribution is
+    heavily right-skewed and a few outliers move both the mean and the SD.
+    Cliff's delta only counts ORDERINGS, so one +8R winner cannot inflate it.
+
+    Ranges -1 to +1. Conventional reading: |d| < 0.15 negligible,
+    < 0.33 small, < 0.47 medium, above that large.
+    """
+    n_t, n_b = len(top), len(bottom)
+    if not n_t or not n_b:
+        return float("nan")
+    # O(n log n) rather than the naive O(n*m) pairwise comparison
+    bot = sorted(bottom)
+    import bisect
+    greater = sum(bisect.bisect_left(bot, x) for x in top)
+    less = sum(n_b - bisect.bisect_right(bot, x) for x in top)
+    return (greater - less) / (n_t * n_b)
+
+
 def _spread_ci(top, bottom, iters=3000, seed=11):
     """Bootstrap CI on the DIFFERENCE between the best and worst bucket.
 
@@ -113,8 +136,19 @@ def _spread_ci(top, bottom, iters=3000, seed=11):
         a = statistics.mean(rng.choice(top) for _ in range(len(top)))
         b = statistics.mean(rng.choice(bottom) for _ in range(len(bottom)))
         diffs.append(a - b)
+    # MEDIAN spread alongside the mean, for the same reason: with fat tails
+    # the two can disagree, and when they do the mean is following outliers.
+    med_diffs = []
+    for _ in range(min(iters, 1500)):
+        a = statistics.median(rng.choice(top) for _ in range(len(top)))
+        b = statistics.median(rng.choice(bottom) for _ in range(len(bottom)))
+        med_diffs.append(a - b)
+    med_diffs.sort()
     diffs.sort()
     lo, hi = diffs[int(0.025 * iters)], diffs[int(0.975 * iters)]
+    m_lo = med_diffs[int(0.025 * len(med_diffs))]
+    m_hi = med_diffs[int(0.975 * len(med_diffs))]
+    median_spread = statistics.median(top) - statistics.median(bottom)
     # Cohen's d — effect SIZE, separate from significance. A gap can be
     # statistically clear and economically trivial; reporting only a p-value
     # or only a spread hides one or the other.
@@ -122,10 +156,13 @@ def _spread_ci(top, bottom, iters=3000, seed=11):
                / 2) ** 0.5
     d = ((statistics.mean(top) - statistics.mean(bottom)) / sd_pool
          if sd_pool else float("nan"))
-    return (lo, hi), d
+    return {"ci": (lo, hi), "cohens_d": d, "cliffs_delta":
+            _cliffs_delta(top, bottom), "median_spread": median_spread,
+            "median_ci": (m_lo, m_hi)}
 
 
-def attribute_features(paired, buckets=3, n_features_tested=None):
+def attribute_features(paired, buckets=3, n_features_tested=None,
+                       iters=3000, seed=11):
     """Which ENTRY FEATURE actually separates winners from losers?
 
     Not machine-learning feature importance — empirical attribution. For each
@@ -189,7 +226,9 @@ def attribute_features(paired, buckets=3, n_features_tested=None):
             n_total = sum(r["n"] for r in rows)
             top_vals = [r for x, r in pts if x >= rows[-1]["lo"]]
             bot_vals = [r for x, r in pts if x <= rows[0]["hi"]]
-            (ci_lo, ci_hi), cohen_d = _spread_ci(top_vals, bot_vals)
+            _st = _spread_ci(top_vals, bot_vals, iters=iters, seed=seed)
+            (ci_lo, ci_hi) = _st["ci"]
+            cohen_d = _st["cohens_d"]
             ci_excludes_zero = (ci_lo == ci_lo and ci_lo > 0)
             if not mono:
                 verdict = ("not monotonic — bucket gaps without a gradient "
@@ -208,7 +247,10 @@ def attribute_features(paired, buckets=3, n_features_tested=None):
                            f"[{ci_lo:+.2f}, {ci_hi:+.2f}], d={cohen_d:+.2f}")
             out[feat] = {"buckets": rows, "spread_r": spread,
                          "monotonic": mono, "n": n_total, "verdict": verdict,
-                         "ci": (ci_lo, ci_hi), "cohens_d": cohen_d}
+                         "ci": (ci_lo, ci_hi), "cohens_d": cohen_d,
+                         "cliffs_delta": _st["cliffs_delta"],
+                         "median_spread": _st["median_spread"],
+                         "median_ci": _st["median_ci"]}
 
     # MULTIPLICITY, the same problem the exit sweep has. Testing k features
     # at 5% each gives a 1-(0.95^k) chance that one looks predictive on noise
@@ -223,11 +265,68 @@ def attribute_features(paired, buckets=3, n_features_tested=None):
     return out
 
 
+def stability(paired, date_key="exit_date", periods=4, min_per_period=25,
+              iters=1500, seed=11):
+    """Does each feature still separate ACROSS TIME, or only in one stretch?
+
+    The question a single pooled number cannot answer. A feature that
+    separated beautifully in Q1 and inverted in Q4 has a pooled result that
+    looks fine and an edge that is gone — and pooling is exactly how you
+    would fail to notice.
+
+        Q1  ADX separates   +0.6R
+        Q2  ADX separates   +0.5R
+        Q3  ADX flat        +0.0R
+        Q4  ADX negative    -0.3R
+
+    That pattern averages to something mildly positive and describes a
+    feature that stopped working. Splitting by period is what makes decay
+    visible while it is happening rather than after it has cost you a year.
+
+    Reports each period's spread plus a SIGN-CONSISTENCY count, which is the
+    number that matters: an edge that changes sign is not a weak edge, it is
+    a different thing in each regime.
+    """
+    dated = [t for t in paired if t.get(date_key)]
+    if len(dated) < periods * min_per_period:
+        return {"error": f"{len(dated)} dated trades — need "
+                         f"{periods * min_per_period} for {periods} periods"}
+    dated.sort(key=lambda t: t[date_key])
+    size = len(dated) // periods
+    out = {}
+    for i in range(periods):
+        chunk = dated[i * size:(i + 1) * size] if i < periods - 1 \
+            else dated[i * size:]
+        res = attribute_features(chunk, iters=iters, seed=seed)
+        label = f"P{i+1} ({chunk[0][date_key]}..{chunk[-1][date_key]})"
+        for feat, r in res.items():
+            out.setdefault(feat, []).append(
+                {"period": label, "n": r["n"], "spread": r["spread_r"],
+                 "cliffs": r.get("cliffs_delta", float("nan"))})
+    summary = {}
+    for feat, rows in out.items():
+        signs = [1 if r["spread"] > 0 else -1 for r in rows]
+        consistent = abs(sum(signs)) == len(signs)
+        summary[feat] = {
+            "periods": rows, "sign_consistent": consistent,
+            "verdict": ("STABLE — same direction in every period"
+                        if consistent else
+                        "UNSTABLE — the sign flips between periods, so this "
+                        "is regime-dependent, not an edge")}
+    return summary
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audit_file", nargs="?", default="audit.jsonl")
     ap.add_argument("--system", help="filter to one desk")
     ap.add_argument("--buckets", type=int, default=4)
+    ap.add_argument("--bootstrap-iters", type=int, default=3000,
+                    help="fewer for a quick look, more for a promotion call")
+    ap.add_argument("--seed", type=int, default=11,
+                    help="fixed so a result can be reproduced, not just re-read")
+    ap.add_argument("--stability", action="store_true",
+                    help="split by period: does each feature hold over TIME?")
     a = ap.parse_args()
 
     rows = load(a.audit_file)
