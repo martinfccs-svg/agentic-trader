@@ -287,6 +287,8 @@ class SwingRiskEngine:
                     trail_after_r=float(os.getenv("SWING_V2_TRAIL_AFTER_R", "1.0")),
                     staged_lock=os.getenv("SWING_V2_STAGED_LOCK", "").lower()
                     in ("on", "true", "1", "yes"),
+                    percent_lock=os.getenv("SWING_V2_PROFIT_LOCK", "").lower()
+                    in ("on", "true", "1", "yes"),
                     adx_trail=os.getenv("SWING_V2_ADX_TRAIL", "").lower()
                     in ("on", "true", "1", "yes"),
                     vol_exit_mult=float(os.getenv("SWING_V2_VOL_EXIT", "0")),
