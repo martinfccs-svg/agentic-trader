@@ -470,11 +470,25 @@ def _enter(variant: str, s: Setup, px: float, equity: float, live: bool):
                         f"stop={stop:.2f}"),
                 raw={"stop": stop, "variant": variant,
                      "atr14": s.atr14, "adx": s.adx_at_setup,
+                     "setup_age_days": _age, "setup_created": s.created,
+                     "vol_ratio": s.vol_ratio_setup,
                      "source": "swing_v2"}))
             BOOK.entries_today[variant] = BOOK.entries_today.get(variant, 0) + 1
-            log.warning("SWING2 ROUTED var=%s %s px=%.2f stop=%.2f -> "
-                        "swing engine (engine sizes and executes)",
-                        variant, s.symbol, px, stop)
+            # SETUP AGE AT ENTRY (2026-08-06). A setup is created on the
+            # pullback candle and expires after SETUP_EXPIRY_DAYS. How long
+            # it WAITED before the breakout triggered is the difference
+            # between catching a move and joining it late — and it was never
+            # recorded, so "are entries arriving too late?" was unanswerable.
+            #
+            # age 0 = triggered the same session the setup formed.
+            # age 2-3 = the setup sat near expiry before firing, which is
+            # where a late entry would show up as poor MFE later.
+            _age = _age_days(s.created)
+            log.warning("SWING2 ROUTED var=%s %s px=%.2f stop=%.2f "
+                        "setup_age=%dd (created %s, expires after %dd) "
+                        "adx=%.0f -> swing engine (engine sizes and executes)",
+                        variant, s.symbol, px, stop, _age, s.created,
+                        SETUP_EXPIRY_DAYS, s.adx_at_setup)
             _audit_mirror("swing2_routed", variant=variant, ticker=s.symbol,
                           px=round(px, 2), stop=round(stop, 2))
         except Exception as e:  # noqa: BLE001 — never break the scan
@@ -560,6 +574,22 @@ def take_pending_signals() -> list:
     global _pending
     out, _pending = _pending, []
     return out
+
+
+def _age_days(created: str) -> int:
+    """Trading days between the setup candle and now. 0 = same session."""
+    try:
+        from datetime import date
+        y, m, d = (int(x) for x in created.split("-"))
+        a, b = date(y, m, d), datetime.now(ET).date()
+        n, cur = 0, a
+        while cur < b:
+            cur = date.fromordinal(cur.toordinal() + 1)
+            if cur.weekday() < 5:
+                n += 1
+        return n
+    except Exception:  # noqa: BLE001 — telemetry must not block an entry
+        return -1
 
 
 def _refuse_live_mode() -> bool:
