@@ -200,12 +200,12 @@ class IntradayRiskEngine:
                             card.score)
             _log_reject(signal.ticker,
                         "v2 gate score=%.2f (min %.2f) gates[time=%s "
-                        "mkt=%s rv=%s vol=%s] (time=trading window "
-                        "9:35-11:15 / 13:30-15:30 ET; mkt=SPY above VWAP "
+                        "mkt=%s rv=%s vol=%s] (time=%s; mkt=SPY above VWAP "
                         "and EMA50; rv=relative volume; vol=ATR%% band)"
                         % (card.score, ids.SCORE_MIN,
-                                           card.gate_window, card.gate_market,
-                                           card.gate_rv, card.gate_volband))
+                           card.gate_window, card.gate_market,
+                           card.gate_rv, card.gate_volband,
+                           ids.schedule_text()))
             return
 
         if INTRADAY_ENTRIES and INTRADAY_V2_GATE and card is not None \
@@ -262,6 +262,21 @@ class IntradayRiskEngine:
         self._flattened_latch = False   # new position -> flatten may act again
         self._log.record(signal, System.INTRADAY, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
+        # QUALITY OF WHAT WAS ACCEPTED (2026-08-06). Rejects have always been
+        # logged in detail; accepts recorded only the shares and stop. So the
+        # log could explain every trade NOT taken and almost nothing about the
+        # ones that were — and it is the accepted trades whose quality you
+        # later want to correlate with P&L. The card already carries the
+        # factor breakdown; it was simply never written down.
+        if card is not None:
+            try:
+                _p = " ".join(f"{k}={v:.3f}" for k, v in
+                              sorted(card.parts.items(), key=lambda x: -x[1]))
+                log.warning("INTRADAY ACCEPTED %s: score=%.3f (min %.2f) | %s "
+                            "| stop=%.2f shares=%.2f", signal.ticker,
+                            card.score, ids.SCORE_MIN, _p, stop, shares)
+            except Exception:  # noqa: BLE001 — telemetry must not block a fill
+                pass
 
     def manage_open_positions(self):
         # First, book any positions whose bracket legs filled broker-side.
