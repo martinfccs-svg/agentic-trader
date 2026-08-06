@@ -42,6 +42,8 @@ class Broker(Protocol):
     def buy(self, ticker: str, shares: float, price: float, system: System,
             source, stop_price: float) -> Optional[Position]: ...
     def sell(self, ticker: str, price: float) -> float: ...
+    def sell_partial(self, ticker: str, price: float,
+                     shares: float) -> float: ...
     def mark(self, ticker: str, price: float) -> None: ...
     def unrealized_pnl(self, system: System | None = None) -> float: ...
     @property
@@ -89,6 +91,37 @@ class PaperBroker:
         log.info("[PAPER] SELL %s x%.4f @ %.4f -> %.2f [%s]",
                  ticker, pos.shares, fp, realized, pos.system.value)
         self._emit(pos, fp, realized)
+        return realized
+
+    def sell_partial(self, ticker, price, shares):
+        """Close PART of a position. Returns realized P&L on the slice.
+
+        The capability three features have been waiting on: swing_v2's 2R
+        half-exit (the only difference between A_full at Sharpe 0.81 and the
+        A_simple 0.71 currently deployed), meanrev's layered ladder, and
+        intraday scale-outs.
+
+        Cost basis is unchanged by a partial: entry_price is an average, so
+        selling half leaves the remaining half with the same basis. Only the
+        share count moves.
+        """
+        pos = self.positions.get(ticker)
+        if pos is None:
+            return 0.0
+        n = min(float(shares), pos.shares)
+        if n <= 0:
+            return 0.0
+        if n >= pos.shares:
+            return self.sell(ticker, price)      # not partial after all
+        fp = self._slip(price, Side.SELL)
+        self.cash += fp * n - COMMISSION_PER_TRADE
+        realized = (fp - pos.entry_price) * n - COMMISSION_PER_TRADE
+        self.realized_pnl[pos.system] += realized
+        self.realized_today += realized
+        self.fills.append(Fill(ticker, Side.SELL, n, fp, COMMISSION_PER_TRADE))
+        pos.shares -= n
+        log.info("[PAPER] SELL PARTIAL %s x%.4f @ %.4f -> %.2f (%.4f left) "
+                 "[%s]", ticker, n, fp, realized, pos.shares, pos.system.value)
         return realized
 
     def _emit(self, pos, exit_price, realized):
@@ -714,6 +747,103 @@ class AlpacaBroker:
                     pos.shares, pos.entry_stop, realized))
             out[ticker] = realized
         return out
+
+    def sell_partial(self, ticker, price, shares):
+        """Sell PART of a live position, then RE-PROTECT the remainder.
+
+        Order of operations, and every step exists because of a specific
+        hazard:
+
+          1. cancel the bracket legs — they are sized for the FULL position,
+             so leaving them would try to sell shares that no longer exist
+          2. wait for the qty hold to release
+          3. market-sell exactly N shares (NOT close_position, which closes
+             everything)
+          4. reduce the local share count and book the slice
+          5. RE-PLACE A STOP for what remains
+
+        Step 5 is the dangerous one. Between cancelling the old leg and
+        placing the new one, the remainder has no broker-side protection. If
+        the re-place fails the position is NOT naked — the engines check
+        local stops every cycle — but it IS degraded, and portfolio_risk
+        counts an unprotected position at FULL notional. So a failure logs
+        CRITICAL rather than passing quietly.
+
+        Returns realized P&L on the slice sold, or 0.0 if nothing sold.
+        """
+        self._guard_live()
+        from alpaca.common.exceptions import APIError
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
+
+        pos = self.positions.get(ticker)
+        if pos is None:
+            log.warning("[ALPACA] sell_partial %s: not tracked locally", ticker)
+            return 0.0
+        n = min(float(shares), pos.shares)
+        if n <= 0:
+            return 0.0
+        if n >= pos.shares:
+            return self.sell(ticker, price)      # a full close, not a partial
+        qty = int(n)
+        if qty <= 0:
+            log.info("[ALPACA] sell_partial %s: %.4f rounds to 0 shares — "
+                     "nothing sold", ticker, n)
+            return 0.0
+
+        self._cancel_open_orders(ticker)
+        self._await_qty_release(ticker)
+
+        try:
+            order = self._client.submit_order(MarketOrderRequest(
+                symbol=ticker, qty=qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY))
+        except APIError as e:
+            log.error("[ALPACA] sell_partial %s FAILED (%s) — position "
+                      "unchanged, but its bracket legs were CANCELLED. "
+                      "Re-placing the stop.", ticker, e)
+            self._replace_stop(ticker, pos.shares, pos.stop_price)
+            raise
+
+        fill = self._await_fill_price(order.id)
+        exit_price = fill if fill is not None else price
+        realized = (exit_price - pos.entry_price) * qty
+        self.realized_pnl[pos.system] += realized
+        self.realized_today += realized
+        pos.shares -= qty
+        self._save_position_state()
+        log.warning("[ALPACA] SELL PARTIAL %s x%d exit=%.4f (%s) -> %+.2f "
+                    "(%.4f left) [%s]", ticker, qty, exit_price,
+                    "fill" if fill is not None else "quote-est", realized,
+                    pos.shares, pos.system.value)
+
+        self._replace_stop(ticker, pos.shares, pos.stop_price)
+        return realized
+
+    def _replace_stop(self, ticker, shares, stop_price) -> bool:
+        """Put a broker-side stop back on what remains. Loud on failure."""
+        from alpaca.common.exceptions import APIError
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import StopOrderRequest
+        qty = int(shares)
+        if qty <= 0 or not stop_price or stop_price <= 0:
+            return False
+        try:
+            self._client.submit_order(StopOrderRequest(
+                symbol=ticker, qty=qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                stop_price=round(float(stop_price), 2)))
+            log.info("[ALPACA] stop re-placed %s x%d @ %.2f", ticker, qty,
+                     stop_price)
+            return True
+        except APIError as e:
+            log.critical("[ALPACA] COULD NOT RE-PLACE STOP on %s x%d @ %.2f "
+                         "(%s). The remainder has NO broker-side protection "
+                         "until this succeeds — the engine's local stop check "
+                         "still applies each cycle, and portfolio_risk counts "
+                         "it at FULL notional. Retry next cycle.",
+                         ticker, qty, stop_price, e)
+            return False
 
     def sell(self, ticker, price):
         """Close a position. Order of operations matters:
