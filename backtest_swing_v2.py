@@ -1216,5 +1216,43 @@ def main():
           "aren't earning their costs.")
 
 
+def _park_if_service():
+    """A completed backtest must not become a restart loop.
+
+    Railway restarts a SERVICE whose process exits — including one that
+    exited 0 because it finished successfully. So a sweep run as a service
+    would complete, exit, restart, and re-run: an unbounded loop of Alpaca
+    calls producing a new BACKTEST_RESULTS file every few minutes, with the
+    only symptom being a quietly growing API bill.
+
+    A research job should be a ONE-OFF or a CRON, not a service. When it is
+    a service anyway, parking keeps the process alive so the platform sees a
+    healthy container and the results stay readable in the logs instead of
+    scrolling past in the next restart.
+    """
+    import os
+    import time as _t
+    if not os.getenv("RAILWAY_ENVIRONMENT") and not os.getenv(
+            "RAILWAY_SERVICE_NAME"):
+        return                      # local run: exiting is correct
+    if os.getenv("BACKTEST_EXIT_WHEN_DONE", "").lower() in ("1", "true", "on"):
+        return                      # explicit one-off / cron: let it exit
+    print("\n" + "=" * 78)
+    print("RUN COMPLETE — parking instead of exiting.")
+    print("=" * 78)
+    print("  This is running as a Railway SERVICE, and Railway restarts a")
+    print("  service whose process exits — even on success. Exiting here")
+    print("  would re-run the whole sweep every few minutes.")
+    print()
+    print("  Results are above and written to BACKTEST_RESULTS_*.md /")
+    print("  BACKTEST_EXPERIMENT_*.json. Read them, then stop this service.")
+    print()
+    print("  For a repeatable job use a Railway CRON or a one-off command,")
+    print("  or set BACKTEST_EXIT_WHEN_DONE=true to allow a clean exit.")
+    while True:
+        _t.sleep(3600)
+
+
 if __name__ == "__main__":
     main()
+    _park_if_service()
