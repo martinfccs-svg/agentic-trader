@@ -64,7 +64,13 @@ from indicators import ema  # canonical (2026-08-02)
 
 ET = ZoneInfo("America/New_York")
 
-SCORE_MIN = float(os.getenv("INTRADAY_SCORE_MIN", "0.70"))
+# 0.65, matching what is deployed (lowered from 0.70 on 2026-07-29 after the
+# funnel showed the MARKET gate was the binding constraint, not the score).
+# The default now equals the live value on purpose: if INTRADAY_SCORE_MIN
+# were ever cleared from Railway the desk would silently TIGHTEN to 0.70 —
+# a behaviour change caused by an ABSENCE, which is the failure mode that has
+# bitten this project repeatedly. A missing variable should cost nothing.
+SCORE_MIN = float(os.getenv("INTRADAY_SCORE_MIN", "0.65"))
 RV_GATE = float(os.getenv("INTRADAY_RV_GATE", "2.0"))
 COOLDOWN_MIN = int(os.getenv("INTRADAY_COOLDOWN_MIN", "45"))
 ATR_PCT_MIN, ATR_PCT_MAX = 0.0010, 0.015   # intraday scale, corrected
