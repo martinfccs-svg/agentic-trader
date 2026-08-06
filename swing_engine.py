@@ -233,6 +233,41 @@ class SwingRiskEngine:
         self._log.record(signal, System.SWING, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
 
+        # ---- FEATURES AT ENTRY, PERSISTED (2026-08-06) -------------------
+        # The setup's ADX, relative strength, volume ratio and AGE were being
+        # computed and carried on the signal — and then discarded the moment
+        # the position opened. Only the shadow path wrote to the audit trail.
+        #
+        # Feature attribution ("does a 2-day-old setup have lower expectancy
+        # than a same-day one?") is not a tool problem, it is a DATA problem:
+        # without these fields on the trade record, no amount of trading makes
+        # the question answerable. Six months of entries would have produced
+        # six months of unattributable trades.
+        try:
+            _raw = getattr(signal, "raw", None) or {}
+            audit.record("swing_entry", notify=False,
+                         ticker=signal.ticker,
+                         shares=round(shares, 2),
+                         price=round(q.price, 4),
+                         stop=round(stop, 4),
+                         risk_per_share=round(q.price - stop, 4),
+                         system=System.SWING.value,
+                         source=getattr(signal.source, "value", None),
+                         # the features that made this trade
+                         adx=_raw.get("adx"),
+                         atr14=_raw.get("atr14"),
+                         vol_ratio=_raw.get("vol_ratio"),
+                         setup_age_days=_raw.get("setup_age_days"),
+                         setup_created=_raw.get("setup_created"),
+                         variant=_raw.get("variant"),
+                         bench_at_entry=getattr(pos, "bench_at_entry", None),
+                         risk_pct=position_sizing.risk_pct(
+                             "swing", "v2" if _V2_ROUTE else None))
+        except Exception as e:  # noqa: BLE001 — telemetry never blocks a fill
+            log.error("swing: could not record entry features for %s (%s) — "
+                      "this trade will not be attributable later",
+                      signal.ticker, e)
+
     def manage_open_positions(self):
         # Book any position whose broker-side bracket leg filled since the
         # last cycle (keeps the tracker honest without a phantom close).
