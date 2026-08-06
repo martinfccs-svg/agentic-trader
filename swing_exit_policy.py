@@ -57,6 +57,7 @@ class SwingExitConfig:
     trail_after_r: float = 1.0
     adx_trail: bool = False
     staged_lock: bool = False
+    percent_lock: bool = False      # profit floor in PERCENT, not ATR
     vol_exit_mult: float = 0.0      # 0 = off
     adx_decay_frac: float = 0.0     # 0 = off
     rs_exit_lag: float = 0.0        # 0 = off; e.g. 0.05 = 5pp behind bench
@@ -129,6 +130,14 @@ def evaluate(ctx: SwingExitContext, cfg: SwingExitConfig
     if cfg.staged_lock and ctx.atr_now:
         stop, _ = exit_rules.staged_profit_lock(
             ctx.entry, ctx.high_water, ctx.atr_now, stop, ctx.ema20)
+
+    # Composes with the ATR ladder — whichever stop is HIGHER wins, because
+    # both only ratchet up. On a low-volatility name the ATR rungs are finer;
+    # on a volatile one (ARM at 11.3% ATR) they are unreachable and this is
+    # the only thing that locks anything.
+    if cfg.percent_lock:
+        stop, _ = exit_rules.percent_profit_lock(
+            ctx.entry, ctx.high_water, stop)
 
     # ---- 2. the hard floor ---------------------------------------------
     fill, why = exit_rules.gap_exit(ctx.open, stop, ctx.low)
