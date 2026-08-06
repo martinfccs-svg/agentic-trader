@@ -71,6 +71,7 @@ SCHEMA: dict[str, dict[str, tuple]] = {
         "time_stop_days": (3, 60, int),
         "staged_lock": (0, 1, bool),
         "adx_trail": (0, 1, bool),
+        "percent_lock": (0, 1, bool),
     },
     "meanrev": {
         "score_min": (0, 6, int),
@@ -89,6 +90,9 @@ ENV_OVERRIDE: dict[str, dict[str, str]] = {
     "xsection": {"sector_cap": "XSECT_SECTOR_CAP", "lookback": "XS_LOOKBACK",
                  "skip": "XS_SKIP", "max_positions": "XS_TOP_N"},
     "swing": {"risk_pct": "SWING_RISK_PCT", "trail_atr": "SWING_V2_TRAIL_ATR",
+              "percent_lock": "SWING_V2_PROFIT_LOCK",
+              "staged_lock": "SWING_V2_STAGED_LOCK",
+              "adx_trail": "SWING_V2_ADX_TRAIL",
               "vol_exit_mult": "SWING_V2_VOL_EXIT",
               "adx_decay_frac": "SWING_V2_ADX_DECAY",
               "rs_exit_lag": "SWING_V2_RS_EXIT",
@@ -137,6 +141,36 @@ def _validate(desk: str, raw: dict) -> tuple[dict, list]:
             continue
         clean[k] = val
     return clean, problems
+
+
+def audit_schema(policy_fields: dict = None) -> dict:
+    """Which swing exit options can the SWEEP promote that the registry
+    cannot carry?
+
+    The registry is the only path from a research decision to production. A
+    setting missing from SCHEMA is silently DROPPED — validated away as "not
+    a known setting" — so a promoted improvement would never reach the desk
+    and the only evidence would be one log line. That already happened once:
+    percent_lock shipped as sweep variant 9 while the schema knew nothing
+    about it.
+
+    Compares SCHEMA["swing"] against SwingExitConfig's fields, since those
+    are exactly what the sweep can turn on.
+    """
+    if policy_fields is None:
+        try:
+            import dataclasses
+            import swing_exit_policy
+            policy_fields = {f.name for f in
+                             dataclasses.fields(swing_exit_policy.SwingExitConfig)}
+        except Exception:  # noqa: BLE001
+            return {}
+    known = set(SCHEMA.get("swing", {}))
+    # grace/require fields are mechanics, not promotable knobs
+    skip = {"ema20_grace_days", "rs_exit_min_days", "time_stop_require_r"}
+    missing = sorted((policy_fields - known) - skip)
+    extra = sorted(known - policy_fields)
+    return {"missing_from_schema": missing, "in_schema_not_in_policy": extra}
 
 
 def load(desk: str) -> dict:
