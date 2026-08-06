@@ -201,6 +201,7 @@ def attribute_features(paired, buckets=3, n_features_tested=None,
                 if len(ch) < 2:
                     continue
                 rows.append({"lo": v, "hi": v, "n": len(ch),
+                             "vals": [r for _, r in ch],
                              "mean_r": statistics.mean(r for _, r in ch),
                              "win": sum(1 for _, r in ch if r > 0) / len(ch)})
         else:
@@ -210,6 +211,7 @@ def attribute_features(paired, buckets=3, n_features_tested=None,
                 if len(ch) < 2:
                     continue
                 rows.append({"lo": ch[0][0], "hi": ch[-1][0], "n": len(ch),
+                             "vals": [v for _, v in ch],
                              "mean_r": statistics.mean(v for _, v in ch),
                              "win": sum(1 for _, v in ch if v > 0) / len(ch)})
         if len(rows) >= 2:
@@ -224,8 +226,21 @@ def attribute_features(paired, buckets=3, n_features_tested=None,
             # gradients. n is reported because at 30 per bucket even a
             # monotonic gradient is suggestive, not settled.
             n_total = sum(r["n"] for r in rows)
-            top_vals = [r for x, r in pts if x >= rows[-1]["lo"]]
-            bot_vals = [r for x, r in pts if x <= rows[0]["hi"]]
+            # THE ACTUAL BUCKET CONTENTS, not a threshold filter.
+            #
+            # This was `[r for x, r in pts if x >= rows[-1]["lo"]]`, which
+            # reads as "the top bucket" and is not, whenever a boundary VALUE
+            # spans two buckets. Measured on a feature with heavy ties: the
+            # threshold sets held 21 observations against buckets of 14 — 50%
+            # larger, and pulling in MIDDLE-bucket values that shrink the
+            # measured spread toward zero. Worse, the two sets could in
+            # principle overlap, comparing part of a group against itself.
+            #
+            # Comparing the recorded members removes the ambiguity: top and
+            # bottom are exactly the buckets shown in the output, so the
+            # printed table and the statistic describe the same thing.
+            top_vals = rows[-1]["vals"]
+            bot_vals = rows[0]["vals"]
             _st = _spread_ci(top_vals, bot_vals, iters=iters, seed=seed)
             (ci_lo, ci_hi) = _st["ci"]
             cohen_d = _st["cohens_d"]
@@ -316,6 +331,60 @@ def stability(paired, date_key="exit_date", periods=4, min_per_period=25,
     return summary
 
 
+def promotion_report(paired, iters=3000, seed=11, min_n=100):
+    """One table per feature, ending in a recommendation.
+
+    Everything here is already computed elsewhere; what this adds is a single
+    place where the answer is stated rather than assembled by eye. The value
+    is not the statistics — it is that COLLECT MORE DATA is a first-class
+    verdict with a reason attached, so "not yet" is a recorded decision
+    rather than an absence of one.
+
+    A feature is PROMOTE only if all five hold:
+        monotonic gradient, CI excluding zero, |Cliff's delta| >= 0.15,
+        n >= min_n, and sign-consistent across periods where testable.
+    """
+    res = attribute_features(paired, iters=iters, seed=seed)
+    stab = stability(paired, iters=max(600, iters // 4), seed=seed)
+    lines = ["", "=" * 78, "FEATURE PROMOTION REPORT", "=" * 78]
+    k = len(res)
+    if k > 1:
+        lines.append(f"  {k} features tested -> {1-(0.95**k):.0%} chance that "
+                     f"one clears on noise alone. Judge accordingly.")
+    out = {}
+    for feat, r in sorted(res.items()):
+        ci_lo, ci_hi = r.get("ci", (float("nan"),) * 2)
+        cd = r.get("cliffs_delta", float("nan"))
+        st = stab.get(feat) if isinstance(stab, dict) else None
+        stable = st.get("sign_consistent") if isinstance(st, dict) else None
+        checks = [
+            ("monotonic gradient", r["monotonic"], r["monotonic"]),
+            ("CI excludes zero", ci_lo == ci_lo and ci_lo > 0,
+             f"[{ci_lo:+.2f}, {ci_hi:+.2f}]"),
+            ("effect size (Cliff)", cd == cd and abs(cd) >= 0.15, f"{cd:+.2f}"),
+            (f"sample >= {min_n}", r["n"] >= min_n, r["n"]),
+            ("stable across periods", stable is not False,
+             "yes" if stable else ("no" if stable is False else "untestable")),
+        ]
+        ok = all(c[1] for c in checks)
+        blocked = [c[0] for c in checks if not c[1]]
+        rec = ("PROMOTE" if ok else
+               ("REJECT — the sign flips between periods"
+                if stable is False else
+                f"COLLECT MORE DATA — blocked on: {', '.join(blocked)}"))
+        lines += ["", f"  {feat}",
+                  f"    sample        {r['n']}",
+                  f"    mean spread   {r['spread_r']:+.2f}R",
+                  f"    median spread {r.get('median_spread', float('nan')):+.2f}R",
+                  f"    95% CI        [{ci_lo:+.2f}, {ci_hi:+.2f}]",
+                  f"    Cliff's delta {cd:+.2f}",
+                  f"    stable        {'yes' if stable else ('NO' if stable is False else 'untestable')}",
+                  f"    RECOMMENDATION  {rec}"]
+        out[feat] = {"recommendation": rec, "promote": ok, "checks": checks}
+    lines += ["", "=" * 78]
+    return out, lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audit_file", nargs="?", default="audit.jsonl")
@@ -325,6 +394,8 @@ def main():
                     help="fewer for a quick look, more for a promotion call")
     ap.add_argument("--seed", type=int, default=11,
                     help="fixed so a result can be reproduced, not just re-read")
+    ap.add_argument("--promotion-report", action="store_true",
+                    help="one table per feature, ending in a recommendation")
     ap.add_argument("--stability", action="store_true",
                     help="split by period: does each feature hold over TIME?")
     a = ap.parse_args()
