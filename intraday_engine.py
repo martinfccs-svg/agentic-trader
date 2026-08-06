@@ -41,7 +41,22 @@ INTRADAY_ENTRIES = os.getenv("INTRADAY_ENTRIES", "true").lower() == "true"
 # restores plain v6 behavior; flipping this on makes v2 the gatekeeper.
 # Fixes the reviewer-caught gap where live mode computed the score and then
 # ignored it. Fail-open: if the card can't be computed, v6 decides.
-INTRADAY_V2_GATE = os.getenv("INTRADAY_V2_GATE", "false").lower() == "true"
+# DEFAULT true, changed 2026-08-06. It was "false", and that default FAILS
+# OPEN: the qualification check below reads
+#
+#     if INTRADAY_ENTRIES and INTRADAY_V2_GATE and not card.qualifies(): reject
+#
+# so with the gate off the whole rejection branch is skipped and intraday
+# takes trades with NO score minimum, NO trading-window check, NO relative
+# volume and NO market gate. Losing one Railway variable would have removed
+# every intraday quality filter at once, silently.
+#
+# The test for a default is not "what does deployment use" but "what happens
+# if the variable disappears". SWING_V2_ROUTE, MEANREV_SCORING and
+# REGIME_ALLOC all default to off/shadow even though they run live, and those
+# are CORRECT: losing them makes those desks do LESS. This one made intraday
+# do more, which is the wrong direction to fail in.
+INTRADAY_V2_GATE = os.getenv("INTRADAY_V2_GATE", "true").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # REJECTION VISIBILITY (2026-07-24). Rejections went only to TradeLogger,
