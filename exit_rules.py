@@ -141,6 +141,45 @@ def select_atr_trail_band(adx: Optional[float], default: float = 2.0) -> float:
 adx_trail_mult = select_atr_trail_band
 
 
+PROFIT_LOCK_TIERS = ((0.30, 0.22), (0.20, 0.14), (0.10, 0.06), (0.05, 0.02))
+
+
+def percent_profit_lock(entry: float, high_water: float, current_stop: float,
+                        tiers=PROFIT_LOCK_TIERS) -> tuple[float, str]:
+    """Never give back everything — expressed in PERCENT, not ATR.
+
+    Companion to staged_profit_lock, not a replacement, because the ATR
+    version goes inert on volatile names. ARM: entry 242.25, ATR 27.45
+    (11.3% of price). Its rungs need +11.3% just to reach breakeven and
+    +22.7% to lock half an ATR — so at +16.8% the trade had NOTHING locked
+    and a stop sitting 17% BELOW entry. Exactly the case that prompted this.
+
+        gain    minimum locked
+        +5%       +2%
+        +10%      +6%
+        +20%      +14%
+        +30%      +22%
+
+    No target: the position still runs. It simply cannot round-trip a large
+    winner into a small one. The two locks compose — take whichever stop is
+    higher — so a low-volatility name still gets the ATR ladder's finer
+    granularity while a volatile one gets a floor the ATR ladder never
+    reaches.
+
+    Returns (stop, tier_label). NEVER widens.
+    """
+    if entry <= 0:
+        return current_stop, "none"
+    gain = (high_water / entry) - 1.0
+    for threshold, locked in sorted(tiers, reverse=True):
+        if gain >= threshold:
+            floor = entry * (1.0 + locked)
+            if floor > current_stop:
+                return floor, f"lock{locked:.0%}@+{threshold:.0%}"
+            return current_stop, f"lock{locked:.0%}@+{threshold:.0%}(held)"
+    return current_stop, "none"
+
+
 def staged_profit_lock(entry: float, high_water: float,
                        atr: Optional[float], current_stop: float,
                        ema20: Optional[float] = None) -> tuple[float, str]:
