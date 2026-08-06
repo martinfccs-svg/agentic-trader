@@ -222,6 +222,19 @@ def _quarantine_record(ticker: str) -> None:
                   ticker, len(hits), QUARANTINE_MINUTES, QUARANTINE_MINUTES)
 
 
+def _stage_text(stage: dict, total: float, threshold: float = 1.0) -> str:
+    """Name the stages that actually cost time. Silent on a fast cycle —
+    a heartbeat that prints five numbers every second is a heartbeat nobody
+    reads."""
+    if not stage or total < threshold:
+        return ""
+    slow = sorted(((v, k) for k, v in stage.items() if v >= 0.2),
+                  reverse=True)[:3]
+    if not slow:
+        return ""
+    return " | " + " ".join(f"{k}={v:.1f}s" for v, k in slow)
+
+
 def _signal_quality(sig):
     """A desk-local quality figure, or None if that desk has no score.
 
@@ -278,6 +291,21 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     log.info("=== cycle %d start ===", n)
     _cycle_t0 = time.time()
     _health = {"scanned": 0, "routed": 0, "failed": 0, "quarantined": 0}
+    # PER-STAGE TIMING (2026-08-06). Cycle duration alone said a cycle took
+    # 35s and nothing about WHICH part. Yesterday's log ran a 4.2s median
+    # against a 35.1s max — an 8x outlier with no way to attribute it. These
+    # are cheap wall-clock deltas, not a profiler; the point is to name the
+    # stage, then look at it.
+    _stage: dict = {}
+
+    def _timed(name):
+        class _T:
+            def __enter__(s):
+                s.t = time.time(); return s
+            def __exit__(s, *a):
+                _stage[name] = _stage.get(name, 0.0) + (time.time() - s.t)
+                return False
+        return _T()
     feed.new_cycle()                     # one fetch per ticker this cycle (rate-limit fix)
     kill.check_emergencies()
     is_open = force_market_open or market_is_open()
@@ -290,7 +318,8 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # and make the results unattributable (2026-08-01).
     _v2_route = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
         "on", "true", "1", "yes")
-    swing_sigs = ([] if (_v2_route or not swing) else scanner.scan_swing())
+    with _timed("scan_swing"):
+        swing_sigs = ([] if (_v2_route or not swing) else scanner.scan_swing())
     if _v2_route and swing:
         # Scan and drain BEFORE the routing block below. An earlier wiring
         # ran the v2 scan further down, after routing — so every signal it
@@ -346,7 +375,8 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             # that ruled out the composite momentum score and the weighted
             # portfolio risk score. Cross-desk ranking waits for a shared
             # evidence-based metric that does not yet exist.
-            sigs = _rank_within_desk(sigs)
+            with _timed("rank"):
+                sigs = _rank_within_desk(sigs)
             # PER-SIGNAL FAULT ISOLATION (2026-08-04). This loop was
             # unwrapped, so ONE bad signal aborted the whole cycle — which is
             # how a NameError on a single MSFT decision produced 10
@@ -357,6 +387,7 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             # backstop for anything they do not catch, including bugs in the
             # routing path itself. A trading system should degrade one signal
             # at a time, never all at once.
+            _route_t0 = time.time()
             _routed, _failed_tickers, _skipped = 0, [], []
             _health["scanned"] = len(sigs)
             for sig in sigs:
@@ -386,6 +417,7 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
                             len(_skipped), ", ".join(_skipped))
             _health.update(routed=_routed, failed=len(_failed_tickers),
                            quarantined=len(_skipped))
+            _stage["route"] = time.time() - _route_t0
     elif swing_sigs or meanrev_sigs:
         log.info("market closed — %d signal(s) held, NOT routed. They are "
                  "re-derived from live prices at the next open.",
@@ -419,6 +451,7 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     #
     # Runs on the daily-bar cadence, not every cycle: the gates are daily and
     # re-scanning 68 names every minute would add nothing but load.
+    _research_t0 = time.time()
     try:
         import beartrend_scoring
         if beartrend_scoring.MODE != "off" and beartrend_scoring.due():
@@ -433,6 +466,7 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
                 breadth=_st.breadth_pct)
     except Exception as e:  # noqa: BLE001 — research must never break a cycle
         log.error("beartrend research scan failed (non-fatal): %s", e)
+    _stage["research"] = time.time() - _research_t0
 
     # Hard EOD flatten applies to the intraday book only.
     if intraday and is_open and near_close():
@@ -494,7 +528,8 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             n, time.time() - _cycle_t0, _health["scanned"],
             _health["routed"], _health["failed"],
             _health["quarantined"], len(broker.positions),
-            broker.equity, _hb, _reg)
+            broker.equity, _hb, _reg + _stage_text(_stage,
+                                                   time.time() - _cycle_t0))
     except Exception as e:  # noqa: BLE001 — telemetry must never break a cycle
         log.error("cycle health line failed (non-fatal): %s", e)
 
