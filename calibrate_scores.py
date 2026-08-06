@@ -95,7 +95,37 @@ FEATURES = ("adx", "vol_ratio", "setup_age_days", "risk_per_share",
             "atr14", "risk_pct")
 
 
-def attribute_features(paired, buckets=3):
+def _spread_ci(top, bottom, iters=3000, seed=11):
+    """Bootstrap CI on the DIFFERENCE between the best and worst bucket.
+
+    "SEPARATES, in order" was a heuristic: a monotonic gradient with a wide
+    enough spread. That is a reasonable filter and it is not a claim. This
+    resamples both buckets and reports how uncertain the gap actually is —
+    if the interval spans zero, the ordering is decoration.
+    """
+    import random
+    import statistics
+    if len(top) < 5 or len(bottom) < 5:
+        return (float("nan"), float("nan")), float("nan")
+    rng = random.Random(seed)
+    diffs = []
+    for _ in range(iters):
+        a = statistics.mean(rng.choice(top) for _ in range(len(top)))
+        b = statistics.mean(rng.choice(bottom) for _ in range(len(bottom)))
+        diffs.append(a - b)
+    diffs.sort()
+    lo, hi = diffs[int(0.025 * iters)], diffs[int(0.975 * iters)]
+    # Cohen's d — effect SIZE, separate from significance. A gap can be
+    # statistically clear and economically trivial; reporting only a p-value
+    # or only a spread hides one or the other.
+    sd_pool = ((statistics.pstdev(top) ** 2 + statistics.pstdev(bottom) ** 2)
+               / 2) ** 0.5
+    d = ((statistics.mean(top) - statistics.mean(bottom)) / sd_pool
+         if sd_pool else float("nan"))
+    return (lo, hi), d
+
+
+def attribute_features(paired, buckets=3, n_features_tested=None):
     """Which ENTRY FEATURE actually separates winners from losers?
 
     Not machine-learning feature importance — empirical attribution. For each
@@ -157,6 +187,10 @@ def attribute_features(paired, buckets=3):
             # gradients. n is reported because at 30 per bucket even a
             # monotonic gradient is suggestive, not settled.
             n_total = sum(r["n"] for r in rows)
+            top_vals = [r for x, r in pts if x >= rows[-1]["lo"]]
+            bot_vals = [r for x, r in pts if x <= rows[0]["hi"]]
+            (ci_lo, ci_hi), cohen_d = _spread_ci(top_vals, bot_vals)
+            ci_excludes_zero = (ci_lo == ci_lo and ci_lo > 0)
             if not mono:
                 verdict = ("not monotonic — bucket gaps without a gradient "
                            "are what noise looks like")
@@ -165,10 +199,27 @@ def attribute_features(paired, buckets=3):
             elif n_total < 90:
                 verdict = (f"gradient present but only {n_total} trades — "
                            f"suggestive, not settled")
+            elif not ci_excludes_zero:
+                verdict = (f"gradient present, but the 95% CI on the gap "
+                           f"[{ci_lo:+.2f}, {ci_hi:+.2f}] SPANS ZERO — the "
+                           f"ordering is not distinguishable from chance")
             else:
-                verdict = "SEPARATES, in order — earning its place"
+                verdict = (f"SEPARATES — gap {spread:+.2f}R, 95% CI "
+                           f"[{ci_lo:+.2f}, {ci_hi:+.2f}], d={cohen_d:+.2f}")
             out[feat] = {"buckets": rows, "spread_r": spread,
-                         "monotonic": mono, "n": n_total, "verdict": verdict}
+                         "monotonic": mono, "n": n_total, "verdict": verdict,
+                         "ci": (ci_lo, ci_hi), "cohens_d": cohen_d}
+
+    # MULTIPLICITY, the same problem the exit sweep has. Testing k features
+    # at 5% each gives a 1-(0.95^k) chance that one looks predictive on noise
+    # alone. Reported rather than silently corrected, because a Bonferroni
+    # threshold on six features is brutal and the honest move is to say how
+    # many were tried.
+    k = n_features_tested or len(out)
+    if k > 1:
+        for v in out.values():
+            v["n_features_tested"] = k
+            v["p_any_false_positive"] = 1 - (0.95 ** k)
     return out
 
 
