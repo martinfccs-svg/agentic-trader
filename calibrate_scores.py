@@ -91,6 +91,87 @@ def _wilson(wins: int, n: int) -> tuple[float, float]:
     return ((c - m) / d, (c + m) / d)
 
 
+FEATURES = ("adx", "vol_ratio", "setup_age_days", "risk_per_share",
+            "atr14", "risk_pct")
+
+
+def attribute_features(paired, buckets=3):
+    """Which ENTRY FEATURE actually separates winners from losers?
+
+    Not machine-learning feature importance — empirical attribution. For each
+    feature recorded at entry, split the closed trades into buckets and
+    compare realised R. If high-ADX entries return +0.4R and low-ADX ones
+    -0.1R, ADX is earning its gate. If both buckets return the same, the gate
+    is costing you trades and buying nothing.
+
+    THE CRUCIAL LIMIT, because it is easy to over-read: this can only measure
+    features that VARY among the trades you TOOK. A hard gate that rejected
+    everything below ADX 20 means there are no low-ADX trades to compare —
+    so this measures the gate's GRADIENT above its threshold, never whether
+    the threshold itself is right. Answering that needs the gate relaxed in
+    a backtest, not more live trades.
+    """
+    import statistics
+    out = {}
+    for feat in FEATURES:
+        pts = [(t[feat], t["pnl_r"]) for t in paired
+               if isinstance(t.get(feat), (int, float))
+               and t.get("pnl_r") is not None]
+        if len(pts) < buckets * 4:
+            continue
+        pts.sort()
+        distinct = sorted({x for x, _ in pts})
+        rows = []
+        if len(distinct) <= buckets + 2:
+            # LOW-CARDINALITY features (setup_age_days takes 0..3) must be
+            # grouped BY VALUE. Equal-count bucketing splits inside a tie
+            # group — the boundary lands arbitrarily in the middle of "all
+            # the 0s" — and that manufactures monotonic-looking gradients out
+            # of nothing. Caught by a fixture where setup_age was pure noise
+            # and still scored +0.56R monotonic across 150 trades.
+            for v in distinct:
+                ch = [(x, r) for x, r in pts if x == v]
+                if len(ch) < 2:
+                    continue
+                rows.append({"lo": v, "hi": v, "n": len(ch),
+                             "mean_r": statistics.mean(r for _, r in ch),
+                             "win": sum(1 for _, r in ch if r > 0) / len(ch)})
+        else:
+            size = max(1, len(pts) // buckets)
+            for i in range(0, len(pts), size):
+                ch = pts[i:i + size]
+                if len(ch) < 2:
+                    continue
+                rows.append({"lo": ch[0][0], "hi": ch[-1][0], "n": len(ch),
+                             "mean_r": statistics.mean(v for _, v in ch),
+                             "win": sum(1 for _, v in ch if v > 0) / len(ch)})
+        if len(rows) >= 2:
+            spread = rows[-1]["mean_r"] - rows[0]["mean_r"]
+            mono = all(rows[i]["mean_r"] <= rows[i + 1]["mean_r"]
+                       for i in range(len(rows) - 1))
+            # A VERDICT NEEDS BOTH, and the test that produced this rule was
+            # a fixture where setup_age was pure noise: it still showed a
+            # +0.38R spread because the top bucket happened to draw well, and
+            # a spread-only rule called it predictive. A feature that
+            # separates should separate IN ORDER — noise produces gaps, not
+            # gradients. n is reported because at 30 per bucket even a
+            # monotonic gradient is suggestive, not settled.
+            n_total = sum(r["n"] for r in rows)
+            if not mono:
+                verdict = ("not monotonic — bucket gaps without a gradient "
+                           "are what noise looks like")
+            elif abs(spread) < 0.3:
+                verdict = "flat — this feature is not distinguishing anything"
+            elif n_total < 90:
+                verdict = (f"gradient present but only {n_total} trades — "
+                           f"suggestive, not settled")
+            else:
+                verdict = "SEPARATES, in order — earning its place"
+            out[feat] = {"buckets": rows, "spread_r": spread,
+                         "monotonic": mono, "n": n_total, "verdict": verdict}
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audit_file", nargs="?", default="audit.jsonl")
