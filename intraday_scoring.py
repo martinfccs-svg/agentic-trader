@@ -7,7 +7,7 @@ the 22-way AND chain (which is self-contradictory: pullback-to-EMA9 vs
 4-of-5-green-bars-and-rising-highs cannot co-occur, and would trade ~never).
 
 HARD GATES (vetoes):
-  G1 time window     trade only 9:35–11:15 and 13:30–15:30 ET; the midday
+  G1 time window     see WINDOWS_ET below — configurable; the midday
                      dead zone (11:15–13:30) is refused outright
   G2 market filter   SPY above its session VWAP
   G3 rel volume      rv >= 2.0 on the 1-min bar (raised from v6's 1.3)
@@ -72,10 +72,13 @@ ATR_PCT_MIN, ATR_PCT_MAX = 0.0010, 0.015   # intraday scale, corrected
 # SESSION AND MIDDAY BREAK (2026-08-05)
 #
 # The break was 11:15-13:30 — 135 minutes, 38% of the tradeable day. Narrowed
-# to ONE HOUR, defaulting to 12:00-13:00 ET because that is the thinnest hour
-# of the US session: the European close has passed, the US lunch is underway,
-# and institutional flow has not yet resumed for the afternoon. Keeping the
-# worst hour excluded while restoring the 75 minutes on either side.
+# to ONE HOUR: 11:00-12:00 ET by default (2026-08-06, set deliberately).
+#
+# Note this is the EARLY side of the old 11:15-13:30 exclusion, not the
+# thinnest hour — 12:00-13:00 typically carries the lowest volume of the US
+# session. So the reopened 12:00-13:30 stretch is thinner than the 11:00-11:15
+# that is now excluded. The WINDOW-BLOCKED counter and intraday P&L will show
+# whether that matters; this is a setting, not a finding.
 #
 # Configurable rather than hardcoded, so this is a setting that can be tuned
 # or reverted from Railway instead of a redeploy — and so config_check can
@@ -106,8 +109,8 @@ def _hm(env: str, default: tuple) -> tuple:
 
 
 SESSION_OPEN_ET = _hm("INTRADAY_SESSION_OPEN", (9, 35))
-BREAK_START_ET = _hm("INTRADAY_BREAK_START", (12, 0))
-BREAK_END_ET = _hm("INTRADAY_BREAK_END", (13, 0))
+BREAK_START_ET = _hm("INTRADAY_BREAK_START", (11, 0))
+BREAK_END_ET = _hm("INTRADAY_BREAK_END", (12, 0))
 SESSION_CLOSE_ET = _hm("INTRADAY_SESSION_CLOSE", (15, 30))
 
 if not (SESSION_OPEN_ET < BREAK_START_ET < BREAK_END_ET < SESSION_CLOSE_ET):
@@ -115,11 +118,31 @@ if not (SESSION_OPEN_ET < BREAK_START_ET < BREAK_END_ET < SESSION_CLOSE_ET):
                "reverting to defaults so the desk cannot trade a nonsense "
                "schedule", BREAK_START_ET, BREAK_END_ET, SESSION_OPEN_ET,
                SESSION_CLOSE_ET)
-    SESSION_OPEN_ET, BREAK_START_ET = (9, 35), (12, 0)
-    BREAK_END_ET, SESSION_CLOSE_ET = (13, 0), (15, 30)
+    SESSION_OPEN_ET, BREAK_START_ET = (9, 35), (11, 0)
+    BREAK_END_ET, SESSION_CLOSE_ET = (12, 0), (15, 30)
 
 WINDOWS_ET = ((SESSION_OPEN_ET, BREAK_START_ET),
               (BREAK_END_ET, SESSION_CLOSE_ET))
+
+
+def schedule_text() -> str:
+    """The ACTIVE schedule, derived from the constants.
+
+    The reject legend used to hardcode the schedule as a literal string
+    (the old two-window layout). When the windows were narrowed the
+    gate changed and the legend did not — so the log would have described a
+    schedule the desk was not running, and anyone reading it would have drawn
+    the wrong conclusion from a correct observation.
+
+    That is the exact failure this project has a standing rule about: when a
+    label is misread, fix the LABEL. A legend that repeats a constant instead
+    of reading it is a label waiting to lie.
+    """
+    return (f"trading window "
+            f"{SESSION_OPEN_ET[0]:02d}:{SESSION_OPEN_ET[1]:02d}-"
+            f"{BREAK_START_ET[0]:02d}:{BREAK_START_ET[1]:02d} / "
+            f"{BREAK_END_ET[0]:02d}:{BREAK_END_ET[1]:02d}-"
+            f"{SESSION_CLOSE_ET[0]:02d}:{SESSION_CLOSE_ET[1]:02d} ET")
 
 
 def excluded_region(now: Optional[datetime] = None) -> Optional[str]:
