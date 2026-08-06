@@ -57,6 +57,7 @@ trust regardless of how they look.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import statistics
@@ -195,14 +196,36 @@ def fetch_bars(symbols, days):
             "  There is NO synthetic or offline fallback in this harness --\n"
             "  by design. A run without credentials produces no number at\n"
             "  all, rather than a plausible-looking one. Fix the keys.\n")
-    h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
+    h = _auth_headers(key, sec)
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     out = {}
     for i in range(0, len(symbols), 50):
         chunk, page = symbols[i:i + 50], None
         while True:
             params = {"symbols": ",".join(chunk), "timeframe": "1Day",
-                      "start": start, "limit": 10000, "adjustment": "split"}
+                      "start": start, "limit": 10000,
+                      # SPLIT-ONLY, to MATCH LIVE (2026-08-04).
+                      #
+                      # Total return is the right basis for measuring
+                      # performance, and switching to it here was the first
+                      # instinct. But swing_v2 generates live signals on
+                      # split-adjusted prices, and dividend adjustment
+                      # RETROACTIVELY restates every historical bar each time
+                      # a constituent pays out — so replay signals would have
+                      # been computed on prices the live desk never saw. That
+                      # is the same live/replay drift the shared exit policy
+                      # was built to end.
+                      #
+                      # Resolution: signals on split-adjusted (identical to
+                      # live), and the BENCHMARK fetched separately on total
+                      # return, since hold_SPY collects dividends for the
+                      # entire window and understating it by ~2pp over 730
+                      # days flattered every comparison. The strategy's own
+                      # returns still exclude dividends earned while holding
+                      # — roughly 0.3%/yr understated. That residual bias
+                      # runs AGAINST the strategy, which is the safe
+                      # direction for a promotion decision.
+                      "adjustment": "split"}
             if page:
                 params["page_token"] = page
             r = requests.get(f"{STOCK_DATA}/bars", params=params, headers=h,
@@ -218,6 +241,30 @@ def fetch_bars(symbols, days):
     return out
 
 
+def conviction_mult(adx, vol_ratio, lo=0.5, hi=1.5):
+    """Size multiplier from setup quality — the empirical test of Layer 3.
+
+    The proposal is to give higher-scoring candidates more capital. That is
+    only better than equal weighting IF the score predicts outcomes; if it
+    does not, it delivers the same return with more variance, which is
+    strictly worse. Simulation of both cases:
+
+        score predicts : return/variance 0.146 -> 0.553   (much better)
+        score is noise : return/variance 0.164 -> 0.148   (worse)
+
+    So this exists to be MEASURED against equal weighting on real data, not
+    to be switched on. Uses the two quality figures swing_v2 already records
+    at setup — ADX and the setup-candle volume ratio — rather than inventing
+    a composite with new weights.
+    """
+    if adx is None:
+        return 1.0
+    a = max(0.0, min(1.0, (adx - 20.0) / 25.0))          # 20..45 -> 0..1
+    v = max(0.0, min(1.0, ((vol_ratio or 1.2) - 1.2) / 0.8))  # 1.2..2.0
+    q = 0.7 * a + 0.3 * v
+    return lo + (hi - lo) * q
+
+
 def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                exits=None):
     """exits: {"trail_atr":float, "trail_after_r":float, "vol_exit":float,
@@ -229,6 +276,8 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
     TRAIL_AFTER = float(exits.get("trail_after_r", 1.0) or 1.0)
     VOLX = float(exits.get("vol_exit", 0) or 0)
     STAGED = bool(exits.get("staged_lock", False))
+    CONVICTION = bool(exits.get("conviction", False))
+    PCTLOCK = bool(exits.get("percent_lock", False))
     RSX = float(exits.get("rs_exit", 0) or 0)
     ADX_TRAIL = bool(exits.get("adx_trail", False))
     ADXD = float(exits.get("adx_decay", 0) or 0)
@@ -316,6 +365,7 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
             _cfg = swing_exit_policy.SwingExitConfig(
                 trail_atr=TRAIL, trail_after_r=TRAIL_AFTER,
                 adx_trail=ADX_TRAIL, staged_lock=STAGED,
+                percent_lock=PCTLOCK,
                 vol_exit_mult=VOLX, adx_decay_frac=ADXD,
                 rs_exit_lag=RSX, time_stop_days=TIME_STOP_DAYS)
             _ctx = swing_exit_policy.SwingExitContext(
@@ -388,6 +438,14 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                     continue
                 sh = int(min(equity * RISK_PCT / dist,
                              equity * MAX_NOTIONAL_PCT / entry_px))
+                if CONVICTION:
+                    # Scale by setup quality, then RE-CLAMP to the notional
+                    # cap: conviction may never be a route around the cap,
+                    # only a way to take less than it.
+                    sh = int(min(sh * conviction_mult(
+                        getattr(s, "adx_at_setup", None),
+                        getattr(s, "vol_ratio_setup", None)),
+                        equity * MAX_NOTIONAL_PCT / entry_px))
                 if sh <= 0:
                     continue
                 equity -= sh * entry_px * cost
@@ -442,6 +500,42 @@ def stats(curve, trades, years):
             if len(wins) < len(trades) else 0}
 
 
+
+
+def _auth_headers(key=None, sec=None):
+    """Alpaca headers. Extracted so the benchmark fetcher shares one
+    definition with fetch_bars rather than growing a second copy — the same
+    reason seven EMA implementations became one."""
+    key = key or (os.environ.get("ALPACA_API_KEY")
+                  or os.environ.get("APCA_API_KEY_ID", ""))
+    sec = sec or (os.environ.get("ALPACA_SECRET_KEY")
+                  or os.environ.get("APCA_API_SECRET_KEY", ""))
+    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
+
+
+def fetch_benchmark_total_return(days: int):
+    """SPY on TOTAL RETURN, for the benchmark only.
+
+    hold_SPY holds for the whole window and collects every dividend; pricing
+    it split-only understated it by roughly 2pp over 730 days and flattered
+    every comparison against it. Strategy prices stay split-adjusted so
+    replay signals match live exactly — the two series answer different
+    questions and should not share an adjustment.
+    """
+    from datetime import timedelta, timezone as _tz
+    start = (datetime.now(_tz.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    try:
+        r = requests.get(f"{STOCK_DATA}/bars",
+                         params={"symbols": "SPY", "timeframe": "1Day",
+                                 "start": start, "limit": 10000,
+                                 "adjustment": "all"},
+                         headers=_auth_headers(), timeout=30)
+        r.raise_for_status()
+        return r.json().get("bars", {}).get("SPY", [])
+    except Exception as e:  # noqa: BLE001
+        print(f"  benchmark total-return fetch failed ({e}) — falling back to "
+              f"the split-adjusted series, which UNDERSTATES hold_SPY")
+        return []
 
 
 def classify_regime(spy_closes: list[float]) -> str:
@@ -524,6 +618,8 @@ EXIT_VARIANTS = [
     ("+ staged lock", {"staged_lock": True}),
     ("+ ADX trail",   {"adx_trail": True}),
     ("+ RS decay",    {"rs_exit": 0.05}),
+    ("+ conviction",  {"conviction": True}),
+    ("+ profit lock",  {"percent_lock": True}),
 ]
 
 
@@ -531,7 +627,7 @@ def sweep_exits(a):
     base, src = _resolve_universe(a)
     print(f"Universe: {len(base)} symbols from {src}")
     windows = [365, 730]
-    results = {}
+    results, trade_lists, curves = {}, {}, {}
     for days in windows:
         print(f"\n=== fetching {days}d window ===")
         fetch_syms = base + (["SPY"] if "SPY" not in base else [])
@@ -544,6 +640,8 @@ def sweep_exits(a):
             curve, trades = run_config(bars, dates, "A", False, 100_000,
                                        a.cost_bps / 10000, exits=cfg)
             results[(days, name)] = stats(curve, trades, years)
+            trade_lists[(days, name)] = trades
+            curves[(days, name)] = curve
 
     for days in windows:
         print(f"\n{'='*92}\n{days}-DAY WINDOW\n{'='*92}")
@@ -559,11 +657,151 @@ def sweep_exits(a):
                   + ("" if name == "baseline"
                      else f"{ds:>+10.2f}{dd:>+10.1%}"))
 
+    # ---- MULTIPLE HYPOTHESES ------------------------------------------
+    try:
+        import research_framework as rf
+        lw = max(windows)
+        bc = curves.get((lw, "baseline"))
+        if bc and len(bc) > 30:
+            def _rets(c):
+                return [c[i + 1] / c[i] - 1 for i in range(len(c) - 1)
+                        if c[i]]
+            base_r = _rets(bc)
+            cand_r = {n: _rets(curves[(lw, n)]) for n, _ in EXIT_VARIANTS
+                      if n != "baseline" and (lw, n) in curves}
+            rc = rf.reality_check(base_r, cand_r, iters=3000, block=5)
+            if rc:
+                print(f"\n{'='*92}\nREALITY CHECK — is the BEST variant "
+                      f"better than luck?\n{'='*92}")
+                print(f"  {rc['n_variants']} variants were tested. Judging "
+                      f"each in isolation at 5% gives roughly a "
+                      f"{1-(0.95**rc['n_variants']):.0%} chance")
+                print(f"  that one clears the bar on noise alone. This asks "
+                      f"whether the BEST of them did.\n")
+                print(f"  best        : {rc['best']}")
+                print(f"  edge/period : {rc['best_mean_edge']:+.5f}")
+                print(f"  p-value     : {rc['p_value']:.3f}")
+                print(f"  verdict     : {rc['verdict']}")
+                if rc["p_value"] >= 0.05:
+                    print("\n  A variant that clears its own promotion rules")
+                    print("  but NOT this has not survived being cherry-picked.")
+    except Exception as e:  # noqa: BLE001
+        print(f"\n  (reality check unavailable: {e})")
+
+    print(f"\n{'='*92}\nKNOWN BIASES IN THIS RESULT\n{'='*92}")
+    print("  * Universe is TODAY'S 68 names. A list assembled in 2026 cannot")
+    print("    contain a company that failed in 2024, so these numbers are")
+    print("    optimistic by an unmeasured amount. Bounded by window length —")
+    print("    modest over 730 days, severe over a decade, which is why the")
+    print("    2008/1987 replays were declined rather than approximated.")
+    print("  * No delisted names: real universes contain survivors AND")
+    print("    failures. This one contains only survivors.")
+    print("  * Entries assume a fill when price touches the trigger. Monte")
+    print("    Carlo models a 5% miss rate, not partial fills or halts.")
+    print("  * Strategy prices are SPLIT-ADJUSTED, matching live signal")
+    print("    generation exactly. The BENCHMARK is total return, because")
+    print("    hold_SPY collects dividends all window and pricing it")
+    print("    split-only understated it by ~2pp over 730 days. The")
+    print("    strategy's own dividends while holding are excluded (~0.3%/yr)")
+    print("    — a residual bias that runs AGAINST the strategy.")
+
     lines = _promotion_report(results, windows)
     for ln in lines:
         print(ln)
 
+    # ---- MONTE CARLO + ATTRIBUTION on the longest window ---------------
+    long_w = max(windows)
+    base_tr = trade_lists.get((long_w, "baseline"), [])
+    if base_tr:
+        print(f"\n{'='*92}\nMONTE CARLO — how much of this is the sequence "
+              f"you happened to get? ({long_w}d)\n{'='*92}")
+        print(f"{'configuration':<16}{'p05 P&L':>12}{'p50 P&L':>12}"
+              f"{'p95 P&L':>12}{'p05 drawdown':>15}{'P(lose)':>9}")
+        print("-" * 92)
+        for name, _ in EXIT_VARIANTS:
+            tr = trade_lists.get((long_w, name), [])
+            mc = monte_carlo(tr, iters=1500)
+            if mc:
+                print(f"{name:<16}{mc['pnl_p05']:>12,.0f}{mc['pnl_p50']:>12,.0f}"
+                      f"{mc['pnl_p95']:>12,.0f}{mc['dd_p05']:>15,.0f}"
+                      f"{mc['prob_loss']:>9.0%}")
+        print("-" * 92)
+        print("  Resamples trade ORDER, slippage, missed fills and gap losses.")
+        print("  The 5th percentile is the number to survive, not the median.")
+
+        print(f"\n{'='*92}\nATTRIBUTION — WHERE any change came from "
+              f"({long_w}d vs baseline)\n{'='*92}")
+        print(f"{'configuration':<16}{'expectancy':>12}{'win rate':>11}"
+              f"{'avg win':>11}{'avg loss':>11}{'trades':>9}")
+        print("-" * 92)
+        for name, _ in EXIT_VARIANTS:
+            if name == "baseline":
+                continue
+            tr = trade_lists.get((long_w, name), [])
+            if not tr:
+                continue
+            at = attribute(base_tr, tr)
+            print(f"{name:<16}{at['exp_cand'] - at['exp_base']:>+12.1f}"
+                  f"{at['from_win_rate']:>+11.1f}{at['from_avg_win']:>+11.1f}"
+                  f"{at['from_avg_loss']:>+11.1f}"
+                  f"{at['trade_count_delta']:>+9d}")
+        print("-" * 92)
+        print("  A Sharpe gain from SMALLER LOSSES and one from BIGGER WINNERS")
+        print("  imply different follow-up work. The headline number hides which.")
+
+    # ---- STRUCTURED EXPERIMENT RECORD ----------------------------------
+    # The markdown is for READING; this is for COMPARING. After twenty runs
+    # the question stops being "what did this one say?" and becomes "has the
+    # answer moved, and what changed when it did?" — which prose cannot
+    # answer. Records the git hash and seeds so a result can be reproduced
+    # rather than merely re-read.
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        import subprocess
+        _git = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True,
+                              timeout=5).stdout.strip() or None
+        _dirty = bool(subprocess.run(["git", "status", "--porcelain"],
+                                     capture_output=True, text=True,
+                                     timeout=5).stdout.strip())
+    except Exception:  # noqa: BLE001
+        _git, _dirty = None, None
+    _exp = {
+        "experiment": "sweep_exits",
+        "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_hash": _git, "git_dirty": _dirty,
+        "universe_size": len(base), "universe_source": src,
+        "windows": windows, "cost_bps": a.cost_bps,
+        "seeds": {"bootstrap": 7, "monte_carlo": 17},
+        "promotion_thresholds": {
+            "min_sharpe_gain": MIN_SHARPE_GAIN,
+            "max_dd_worsening": MAX_DD_WORSENING,
+            "min_trades": MIN_TRADES},
+        "variants": {name: dict(cfg) for name, cfg in EXIT_VARIANTS},
+        "results": {f"{d}d/{n}": results[(d, n)] for d in windows
+                    for n in [v[0] for v in EXIT_VARIANTS] if (d, n) in results},
+        "known_biases": [
+            "universe is TODAY'S 68 names — a list assembled in 2026 cannot "
+            "contain a company that failed in 2024. Selection bias, bounded "
+            "by window length but not zero.",
+            "no delisted names: real universes contain survivors AND "
+            "failures; this one contains only survivors.",
+            "entries assume a fill when price touches the trigger; Monte "
+            "Carlo models a 5% miss rate, not partial fills or halts.",
+            "strategy prices are SPLIT-ADJUSTED to match live signal "
+            "generation exactly; the BENCHMARK is total return. The "
+            "strategy's own dividends while holding are therefore excluded "
+            "(~0.3%/yr), a residual bias that runs AGAINST it.",
+        ],
+    }
+    try:
+        with open(f"BACKTEST_EXPERIMENT_{stamp}.json", "w",
+                  encoding="utf-8") as fh:
+            json.dump(_exp, fh, indent=2, default=str)
+        print(f"\n  structured record -> BACKTEST_EXPERIMENT_{stamp}.json")
+    except Exception as e:  # noqa: BLE001
+        print(f"  could not write the experiment record: {e}")
+
     path = f"BACKTEST_RESULTS_{stamp}.md"
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -719,6 +957,8 @@ WF_CANDIDATES = [
     ("staged lock", {"staged_lock": True}),
     ("ADX trail",   {"adx_trail": True}),
     ("RS decay",    {"rs_exit": 0.05}),
+    ("conviction",  {"conviction": True}),
+    ("profit lock",  {"percent_lock": True}),
 ]
 
 
@@ -731,6 +971,65 @@ def _slice_stats(bars, dates, lo, hi, cfg, cost):
                                exits=cfg)
     years = max(len(window) / 252, 1e-9)
     return stats(curve, trades, years)
+
+
+# ---------------------------------------------------------------------------
+# MONTE CARLO
+#
+# A backtest reports ONE path: these trades, in this order, with these fills.
+# The 77-run sweep already showed Sharpe spanning -0.05 to 1.62 from parameter
+# choice alone; ordering and fill luck add more. Resampling answers a question
+# walk-forward does not: "how much of THIS result is the sequence I happened
+# to get?"
+#
+# Four perturbations, each modelling a way reality differs from replay:
+#   ordering   — bootstrap the trade sequence (drawdown depends on order)
+#   slippage   — random extra cost per trade
+#   misses     — some signals never fill (queue position, halts, cash)
+#   gaps       — losers occasionally worse than the stop
+#
+# The output that matters is the 5th percentile, not the median. A strategy
+# whose median is +0.8 Sharpe and whose 5th percentile is -0.4 is a strategy
+# that can plausibly lose money for a year.
+# ---------------------------------------------------------------------------
+# Monte Carlo lives in research_framework now, shared with backtest_xsect.
+# Kept as a thin alias so existing call sites read unchanged — the point of
+# the move is ONE implementation, not a rename.
+from research_framework import (monte_carlo_trades as monte_carlo,  # noqa: E402
+                                bootstrap_ci as _rf_bootstrap_ci,
+                                write_experiment as _rf_write_experiment,
+                                UNIVERSE_BIASES as _RF_BIASES)
+
+
+def attribute(base_trades, cand_trades):
+    """WHY expectancy moved: win rate, average win, average loss, or count.
+
+    A sweep that reports "+0.08 Sharpe" does not say whether the gain came
+    from bigger winners, smaller losers, or simply trading less. Those imply
+    completely different follow-up work, and the number alone hides which.
+
+    Decomposes by swapping ONE factor at a time from baseline to candidate:
+        expectancy = win_rate * avg_win + (1 - win_rate) * avg_loss
+    """
+    def parts(ts):
+        w = [t["pnl"] for t in ts if t["pnl"] > 0]
+        l = [t["pnl"] for t in ts if t["pnl"] <= 0]
+        n = len(ts)
+        return {"n": n, "wr": len(w) / n if n else 0.0,
+                "aw": sum(w) / len(w) if w else 0.0,
+                "al": sum(l) / len(l) if l else 0.0}
+    b, c = parts(base_trades), parts(cand_trades)
+
+    def exp_(wr, aw, al):
+        return wr * aw + (1 - wr) * al
+    e_b, e_c = exp_(b["wr"], b["aw"], b["al"]), exp_(c["wr"], c["aw"], c["al"])
+    return {
+        "base": b, "cand": c, "exp_base": e_b, "exp_cand": e_c,
+        "from_win_rate": exp_(c["wr"], b["aw"], b["al"]) - e_b,
+        "from_avg_win": exp_(b["wr"], c["aw"], b["al"]) - e_b,
+        "from_avg_loss": exp_(b["wr"], b["aw"], c["al"]) - e_b,
+        "trade_count_delta": c["n"] - b["n"],
+    }
 
 
 def walk_forward(a):
@@ -831,6 +1130,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--cost-bps", type=float, default=5.0)
+    ap.add_argument("--mc-iters", type=int, default=1500,
+                    help="Monte Carlo resamples in the sweep report")
     ap.add_argument("--walk-forward", action="store_true",
                     help="rolling train/test folds; reports the OUT-OF-SAMPLE "
                          "result and the degradation ratio")
