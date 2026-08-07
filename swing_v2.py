@@ -464,6 +464,24 @@ def _enter(variant: str, s: Setup, px: float, equity: float, live: bool):
         # one sizing authority.
         try:
             from models import Signal, SignalSource
+            # SETUP AGE AT ENTRY (2026-08-06, moved 2026-08-07). A setup is
+            # created on the pullback candle and expires after
+            # SETUP_EXPIRY_DAYS. How long it WAITED before the breakout
+            # triggered is the difference between catching a move and joining
+            # it late — and it was never recorded, so "are entries arriving
+            # too late?" was unanswerable.
+            #
+            # age 0 = triggered the same session the setup formed.
+            # age 2-3 = the setup sat near expiry before firing, which is
+            # where a late entry would show up as poor MFE later.
+            #
+            # COMPUTED HERE, before the Signal is built. It was originally
+            # assigned 13 lines BELOW its use in the raw dict, so every route
+            # raised UnboundLocalError and the signal was dropped — GD failed
+            # 18 cycles running. The exception was caught, so nothing crashed
+            # and nothing traded either: a valid setup discarded silently
+            # every cycle, which is worse than a crash because it looks fine.
+            _age = _age_days(s.created)
             _pending.append(Signal(
                 SignalSource.TREND, s.symbol,
                 reason=(f"swing_v2 {variant}: pullback+candle, "
@@ -474,16 +492,6 @@ def _enter(variant: str, s: Setup, px: float, equity: float, live: bool):
                      "vol_ratio": s.vol_ratio_setup,
                      "source": "swing_v2"}))
             BOOK.entries_today[variant] = BOOK.entries_today.get(variant, 0) + 1
-            # SETUP AGE AT ENTRY (2026-08-06). A setup is created on the
-            # pullback candle and expires after SETUP_EXPIRY_DAYS. How long
-            # it WAITED before the breakout triggered is the difference
-            # between catching a move and joining it late — and it was never
-            # recorded, so "are entries arriving too late?" was unanswerable.
-            #
-            # age 0 = triggered the same session the setup formed.
-            # age 2-3 = the setup sat near expiry before firing, which is
-            # where a late entry would show up as poor MFE later.
-            _age = _age_days(s.created)
             log.warning("SWING2 ROUTED var=%s %s px=%.2f stop=%.2f "
                         "setup_age=%dd (created %s, expires after %dd) "
                         "adx=%.0f -> swing engine (engine sizes and executes)",
