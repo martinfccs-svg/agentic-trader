@@ -38,6 +38,10 @@ log = logging.getLogger("config_check")
 KNOWN = {
     "ABSENT_CONFIRM_SECS", "AFTER_HOURS_INTERVAL_SECS", "ALPACA_API_KEY",
     "ALPACA_PAPER", "ALPACA_SECRET_KEY", "APCA_API_BASE_URL",
+    "AUDIT_LOG_PATH", "FUNNEL_EMIT_SECS", "LIVE_TRADING_CONFIRMED",
+    "MEANREV_LOOKBACK_BARS", "NTFY_SERVER", "NTFY_TOKEN",
+    "REBALANCE_GATE_STATE", "SWING_LOOKBACK_BARS", "TRADES_LOG_PATH",
+    "XSECT_LOOKBACK_BARS", "XSECT_REBALANCE_ET",
     "BEARTREND_ADX_MIN", "BEARTREND_APPROVAL_VALID_DAYS",
     "BEARTREND_BREAKDOWN_DAYS", "BEARTREND_EMA_SLOPE_DAYS",
     "BEARTREND_LOG_SCORE_MIN", "BEARTREND_MODE", "BEARTREND_OBS_PATH",
@@ -490,11 +494,29 @@ def validate() -> tuple[int, int]:
     # ---- promotion registry: what is approved, and is anything using it? -
     try:
         import promotion_registry as _pr
-        _desks = [d for d in _pr.SCHEMA if _pr.load(d)]
-        if _desks:
+        # DISTINGUISH an approved artifact from an env override. load()
+        # returns a non-empty dict when an operator has set a variable, even
+        # with NO artifact on disk — so a truthiness test reported
+        # "PROMOTION artifacts loaded for: xsection (defaults (no artifact))",
+        # which contradicts itself in a single line. Anyone reading it would
+        # conclude research had promoted something. Nothing had.
+        # load() FIRST — it is what populates _source. Reading _source before
+        # calling it returns "" for every desk, which does not start with
+        # "defaults", so every desk looked like it had an artifact. The same
+        # evaluation-order mistake the message was meant to fix.
+        _loaded = {d: bool(_pr.load(d)) for d in _pr.SCHEMA}
+        _with_artifact = [d for d, ok in _loaded.items() if ok and not
+                          _pr._source.get(d, "").startswith("defaults")]
+        _env_only = [d for d, ok in _loaded.items()
+                     if ok and d not in _with_artifact]
+        if _with_artifact:
             infos.append("PROMOTION artifacts loaded for: " + ", ".join(
-                f"{d} ({_pr._source.get(d, '?')})" for d in _desks))
-        else:
+                f"{d} ({_pr._source.get(d, '?')})" for d in _with_artifact))
+        if _env_only:
+            infos.append("PROMOTION: no artifacts; these desks take settings "
+                         "from ENVIRONMENT VARIABLES only: "
+                         + ", ".join(_env_only))
+        if not _with_artifact:
             infos.append("PROMOTION: no approved artifacts — every desk is "
                          "running code defaults and environment variables. "
                          "Expected until research promotes something.")
