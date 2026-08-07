@@ -154,7 +154,7 @@ def build():
                     else "0 (measure)",
                     "on" if RANK_SIGNALS else "off",
                     __import__("beartrend_scoring").MODE + " (research only)",
-                    _pr.banner())
+                    _pr.banner() + " | " + _cfg_hash_text())
         # Full detail on its own lines: which desk took which value, from
         # where. A setting that changes trading must be READ at boot, never
         # inferred from a file nobody opened.
@@ -220,6 +220,82 @@ def _quarantine_record(ticker: str) -> None:
                   "it for %.0f min so the same exception stops flooding the "
                   "log and burning cycle time. Everything else continues.",
                   ticker, len(hits), QUARANTINE_MINUTES, QUARANTINE_MINUTES)
+
+
+class _contained:
+    """Run a non-fatal section, log uniformly, and COUNT the failure.
+
+    There are ~19 `except Exception` blocks in this file. Each is deliberate —
+    telemetry, research and reconciliation must never kill a trading cycle —
+    but each is also a place the system can run DEGRADED with no outward
+    sign. If the cycle-health line throws every cycle, or beartrend fails
+    silently for a week, nothing today would say so.
+
+    This does not change what is caught. It makes the catching visible: the
+    section is named, the failure is logged once with that name, and the name
+    is surfaced on the health line so "quietly broken" becomes "broken, and
+    stated".
+
+        with _contained("cycle_health", _degraded):
+            ...
+
+    Reduces the boilerplate the review flagged, but that is a side effect —
+    the reason is that a swallowed exception nobody counts is a bug that can
+    live forever.
+    """
+
+    def __init__(self, name: str, sink: list = None):
+        self.name, self.sink = name, sink
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc is None:
+            return False
+        log.error("contained failure in %s (non-fatal): %s", self.name, exc)
+        if self.sink is not None:
+            self.sink.append(self.name)
+        return True          # swallow, exactly as before
+
+
+def _state_set(state, why: str = "", force: bool = False) -> None:
+    """Set the lifecycle state without letting telemetry break the boot.
+
+    Wrapped because the states that matter most — HALTED on an orphan, on a
+    failed reconcile — are set on paths that are already handling a serious
+    problem. A state-tracking import error must not become the thing that
+    stops a halt from being recorded.
+    """
+    try:
+        import system_state
+        system_state.set_state(state, why, force=force)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _cfg_hash_text() -> str:
+    """The fingerprint of the configuration this process is running.
+
+    Printed at boot AND stamped on every trade record, so "what config
+    produced trade #1842?" is answerable six weeks later from the trade
+    itself rather than from a boot banner that scrolled away.
+    """
+    try:
+        import config_check as _cc
+        h, pairs = _cc.config_hash()
+        return f"CONFIG_HASH={h}({len(pairs)} set)"
+    except Exception:  # noqa: BLE001
+        return "CONFIG_HASH=unavailable"
+
+
+def _entries_blocked() -> list:
+    """Fatal invariants, read fresh. Boot is never blocked; ENTRIES are."""
+    try:
+        import config_check as _cc
+        return list(getattr(_cc, "ENTRIES_BLOCKED", []) or [])
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _stage_text(stage: dict, total: float, threshold: float = 1.0) -> str:
@@ -297,6 +373,7 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # are cheap wall-clock deltas, not a profiler; the point is to name the
     # stage, then look at it.
     _stage: dict = {}
+    _degraded: list = []      # names of contained sections that failed
 
     def _timed(name):
         class _T:
@@ -388,6 +465,16 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             # routing path itself. A trading system should degrade one signal
             # at a time, never all at once.
             _route_t0 = time.time()
+            # FATAL INVARIANTS (2026-08-07). Boot is never blocked, but a
+            # configuration that cannot safely OPEN positions must not open
+            # them. Everything above this line — reconciliation, exits,
+            # position management — still runs, because stranding an open
+            # book with no manager is worse than not trading.
+            _blocked = _entries_blocked()
+            if _blocked:
+                log.critical("ENTRIES BLOCKED — %d signal(s) dropped: %s",
+                             len(sigs), "; ".join(_blocked))
+                sigs = []
             _routed, _failed_tickers, _skipped = 0, [], []
             _health["scanned"] = len(sigs)
             for sig in sigs:
@@ -499,46 +586,75 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # across ~40 lines. One line makes a bad cycle visible at a glance and
     # gives something greppable to trend over time; the detail above stays
     # for when the summary says something is wrong.
-    try:
+    with _contained("cycle_health", _degraded):
         _hb = ""
-        try:
+        with _contained("heat_readout", _degraded):
             import portfolio_manager as _pmh
             _h = _pmh._heat_now(broker)
             _hb = f" heat={_h:.2%}" if _h is not None else ""
-        except Exception:  # noqa: BLE001
-            pass
         _reg = ""
-        try:
+        with _contained("regime_readout", _degraded):
             import regime_allocation as _ra
             _st = _ra.last_state()
             if _st:
                 _reg = f" regime={_st.label}/{_st.confidence:.0f}%"
-        except Exception:  # noqa: BLE001
-            pass
         # LEVEL BY CONTENT (2026-08-05). This was log.warning unconditionally,
         # so Railway flagged EVERY cycle as an error — 122 of 123 "errors" in
         # a 22-minute window were this line. A monitor that cries wolf on
         # every heartbeat is worse than no monitor: the one real failure is
         # buried in the noise. WARNING only when something actually went
         # wrong; INFO otherwise.
-        _degraded = (_health["failed"] or _health["quarantined"])
-        (log.warning if _degraded else log.info)(
+        _is_degraded = (_health["failed"] or _health["quarantined"]
+                        or _degraded)
+        (log.warning if _is_degraded else log.info)(
             "CYCLE %d HEALTH %.2fs | signals %d routed %d failed %d "
             "quarantined %d | positions %d equity=%.2f%s%s",
             n, time.time() - _cycle_t0, _health["scanned"],
             _health["routed"], _health["failed"],
             _health["quarantined"], len(broker.positions),
             broker.equity, _hb, _reg + _stage_text(_stage,
-                                                   time.time() - _cycle_t0))
-    except Exception as e:  # noqa: BLE001 — telemetry must never break a cycle
-        log.error("cycle health line failed (non-fatal): %s", e)
+                                                   time.time() - _cycle_t0)
+            + (f" | DEGRADED: {','.join(sorted(set(_degraded)))}"
+               if _degraded else ""))
+
+    # Persistent failure is a different fact from an intermittent one. This
+    # escalates only after DEGRADED_AFTER_CYCLES consecutive failures, and
+    # shouts only when a RISK CONTROL is the thing that went blind.
+    with _contained("state_tracking", _degraded):
+        import system_state
+        system_state.note_cycle(_degraded)
+        system_state.set_state(
+            system_state.State.CLOSED if not is_open
+            else system_state.State.TRADING)
+
 
     # Honest P&L: realized and unrealized logged separately, per system.
+    #
+    # DESK ATTRIBUTION (2026-08-06). Dollars alone do not say which desk drove
+    # the day — a desk holding four positions and a desk holding one are not
+    # comparable at a glance. Contribution is (desk P&L / equity), so the
+    # figures sum to the portfolio's own move and one line answers "who did
+    # this?".
+    #
+    # The two columns mean DIFFERENT things and are kept apart because
+    # blending them would be dishonest: realized is CUMULATIVE since process
+    # start, unrealized is a LEVEL on open positions right now, not a change
+    # since this morning. Turning either into "today's return" would need a
+    # day-open snapshot this process does not keep across restarts.
+    _eq = broker.equity or 1.0
     for system in System:
         n_open = sum(1 for p in broker.positions.values() if p.system is system)
-        log.info("  %-8s realized=%.2f unrealized=%.2f open=%d",
-                 system.value, broker.realized_pnl[system],
-                 broker.unrealized_pnl(system), n_open)
+        _r, _u = broker.realized_pnl[system], broker.unrealized_pnl(system)
+        log.info("  %-8s realized=%.2f (%+.2f%% of equity) unrealized=%.2f "
+                 "(%+.2f%%) open=%d",
+                 system.value, _r, 100.0 * _r / _eq, _u, 100.0 * _u / _eq,
+                 n_open)
+    _tr = sum(broker.realized_pnl[s] for s in System)
+    _tu = sum(broker.unrealized_pnl(s) for s in System)
+    log.info("  ATTRIBUTION realized %+.2f%% + unrealized %+.2f%% = %+.2f%% "
+             "of equity | booked today %+.2f",
+             100.0 * _tr / _eq, 100.0 * _tu / _eq, 100.0 * (_tr + _tu) / _eq,
+             getattr(broker, "realized_today", 0.0))
     log.info("  equity=%.2f | === cycle %d complete ===", broker.equity, n)
     return is_open
 
@@ -575,10 +691,13 @@ def run(loop: bool, cycles: int = 40):
     # bot restarted with an empty tracker while Alpaca still held shares and
     # live bracket legs -> re-bought TSLA (72 shares) and 404'd on manage.
     # Re-adopt bot-created positions; HALT on anything unrecognized.
+    _state_set(system_state.State.RECONCILING, "comparing book vs broker")
     if hasattr(broker, "reconcile_at_startup"):
         try:
             orphans = broker.reconcile_at_startup()
         except Exception as e:  # noqa: BLE001
+            _state_set(system_state.State.HALTED,
+                       "reconciliation failed", force=True)
             log.critical("startup reconciliation failed (%s) — HALTING; "
                          "cannot trade without knowing broker state", e)
             audit.halt(reason=f"reconciliation failed: {e}")
@@ -587,6 +706,8 @@ def run(loop: bool, cycles: int = 40):
         audit.reconcile(adopted=sorted(broker.positions), orphans=orphans,
                         profile=sorted(ENABLED_SYSTEMS))
         if orphans:
+            _state_set(system_state.State.HALTED,
+                       f"orphan positions: {orphans}", force=True)
             log.critical("ORPHAN positions at broker: %s — HALTING. Resolve "
                          "in the Alpaca dashboard, then restart.", orphans)
             audit.halt(reason=f"orphan positions at broker: {orphans}")
@@ -675,6 +796,10 @@ def run(loop: bool, cycles: int = 40):
     except KeyboardInterrupt:
         log.warning("interrupt -> flattening intraday before exit")
     finally:
+        # STOPPING is set FIRST in the finally block — before the flatten —
+        # so a shutdown that dies partway through still left a record that
+        # shutdown had begun. Crash #3 (2026-07-06) died INSIDE this block.
+        _state_set(system_state.State.STOPPING, "shutdown", force=True)
         # Crash #3 (2026-07-06) died INSIDE this block: flatten raised on a
         # held bracket, and separately print_scorecard raised AttributeError.
         # Shutdown must complete no matter what either step does.
