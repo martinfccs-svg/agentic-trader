@@ -39,6 +39,7 @@ from meanrev_engine import MeanReversionEngine
 from xsection import CrossSectionalMomentumEngine
 from trade_logger import TradeLogger
 from trade_record import TradeRecorder
+import system_state
 
 # Split-stream logging (2026-07-20): DEBUG/INFO -> stdout, WARNING+ ->
 # stderr. The old basicConfig sent everything to stderr, which Railway maps
