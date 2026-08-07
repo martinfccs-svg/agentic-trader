@@ -165,6 +165,63 @@ def check_names(path: Path) -> list:
     return sorted(set(problems))
 
 
+def check_use_before_assign(path: Path) -> list:
+    """Names USED at a line before any assignment to them in the same scope.
+
+    The check that was missing. `_age` was assigned 13 lines BELOW its use in
+    a dict literal, so every swing_v2 route raised UnboundLocalError — caught
+    by the enclosing try, which meant a valid setup was discarded silently on
+    18 consecutive cycles. Nothing crashed and nothing traded.
+
+    The scope check could not see it: `_age` IS bound in that function, just
+    too late. Line order is the missing dimension.
+
+    Deliberately conservative — it reports only when EVERY assignment in the
+    scope is textually below the first use, and skips names that are also
+    module-level or bound in a loop/comprehension, because those are the
+    shapes where line order legitimately does not imply execution order. A
+    check that guesses produces noise, and noise is how a check gets muted.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return []
+    mod = _module_bindings(tree)
+    out = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        loads, stores = {}, {}
+        looped = set()
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.For, ast.AsyncFor, ast.While,
+                              ast.comprehension)):
+                tgt = getattr(n, "target", None)
+                for sub in ast.walk(n):
+                    if isinstance(sub, ast.Name) and isinstance(sub.ctx,
+                                                                ast.Store):
+                        looped.add(sub.id)
+                if tgt is not None:
+                    for sub in ast.walk(tgt):
+                        if isinstance(sub, ast.Name):
+                            looped.add(sub.id)
+            elif isinstance(n, ast.Name):
+                bucket = stores if isinstance(n.ctx, ast.Store) else loads
+                bucket.setdefault(n.id, []).append(n.lineno)
+            elif isinstance(n, ast.arg):
+                stores.setdefault(n.arg, []).append(n.lineno)
+        for name, use_lines in loads.items():
+            if name in mod or name in BUILTINS or name in looped:
+                continue
+            if name not in stores:
+                continue                    # the scope check owns this case
+            if min(stores[name]) > min(use_lines):
+                out.append(
+                    f"line {min(use_lines)} in {fn.name}(): '{name}' is used "
+                    f"before its only assignment (line {min(stores[name])}) — "
+                    f"UnboundLocalError at runtime")
+    return sorted(set(out))
+
+
 def check_formats(path: Path) -> list:
     """%-format calls whose placeholder count differs from the arg count."""
     try:
@@ -210,7 +267,8 @@ def main():
              sorted(Path(".").glob("*.py")))
     bad = 0
     for p in paths:
-        issues = check_names(p) + check_formats(p)
+        issues = (check_names(p) + check_use_before_assign(p)
+                  + check_formats(p))
         if issues:
             bad += 1
             print(f"\n{p}")
