@@ -35,6 +35,7 @@ from swing_v2 import scan_swing_v2, take_pending_signals
 import regime
 import portfolio_risk
 import regime_allocation
+import system_state
 from meanrev_engine import MeanReversionEngine
 from xsection import CrossSectionalMomentumEngine
 from trade_logger import TradeLogger
