@@ -15,6 +15,25 @@ from models import Action, Signal, System
 from risk import position_size
 import portfolio_manager
 import position_sizing
+
+_CFG_HASH = None
+
+
+def _config_hash() -> str:
+    """Cached config fingerprint, stamped on every entry.
+
+    Cached because it cannot change while the process runs — the values are
+    read from the environment at boot — and re-hashing on every fill would
+    pay for nothing.
+    """
+    global _CFG_HASH
+    if _CFG_HASH is None:
+        try:
+            import config_check
+            _CFG_HASH = config_check.config_hash()[0]
+        except Exception:  # noqa: BLE001 — telemetry never blocks a fill
+            _CFG_HASH = "unknown"
+    return _CFG_HASH
 import loss_cooldown
 import exit_exec
 import swing_exit_policy
@@ -262,7 +281,12 @@ class SwingRiskEngine:
                          variant=_raw.get("variant"),
                          bench_at_entry=getattr(pos, "bench_at_entry", None),
                          risk_pct=position_sizing.risk_pct(
-                             "swing", "v2" if _V2_ROUTE else None))
+                             "swing", "v2" if _V2_ROUTE else None),
+                         # WHICH MACHINE produced this trade. A boot banner
+                         # scrolls away; a trade record does not. Six weeks
+                         # from now this is how "what config ran trade #1842?"
+                         # gets answered from the trade itself.
+                         config_hash=_config_hash())
         except Exception as e:  # noqa: BLE001 — telemetry never blocks a fill
             log.error("swing: could not record entry features for %s (%s) — "
                       "this trade will not be attributable later",
