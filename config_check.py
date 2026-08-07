@@ -48,7 +48,7 @@ KNOWN = {
     "COMMISSION_PER_TRADE", "CONCENTRATION_TOP_N", "CONCENTRATION_TOP_N_MAX",
     "CORRELATION_BLOCK", "CORRELATION_LOOKBACK", "CORRELATION_MIN_OBS",
     "CORRELATION_MODE", "CORRELATION_WARN", "DAILY_BARS_REFRESH_CYCLES",
-    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR", "DESK_BUDGET_PCT",
+    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR", "DEGRADED_AFTER_CYCLES", "DESK_BUDGET_PCT",
     "DRAWDOWN_SCALING", "DRAWDOWN_STATE_PATH", "ENABLED_SYSTEMS",
     "ENTRY_SETTLE_GRACE_SECS", "FINNHUB_API_KEY", "FLATTEN_BEFORE_CLOSE_MIN",
     "INTRADAY_ATR_MULT", "INTRADAY_BREAK_END", "INTRADAY_BREAK_START",
@@ -135,6 +135,7 @@ RANGES = {
     "PORTFOLIO_HEAT_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "PORTFOLIO_HEAT_TAPER": (0.0, 1.0, "fraction; 0 = off"),
     "SECTOR_MAX_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
+    "DEGRADED_AFTER_CYCLES": (1, 60, "consecutive failures before escalating"),
     "DESK_BUDGET_PCT": (0.0, 1.0, "fraction of equity PER DESK; 0 = MEASURE ONLY"),
     "CONCENTRATION_TOP_N_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "MAX_PARTICIPATION_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
@@ -180,6 +181,70 @@ def _num(name):
         return float(v)
     except ValueError:
         return "NaN"
+
+
+def fatal_invariants() -> list:
+    """Conditions under which the system must NOT open new positions.
+
+    config_check has always refused to block boot, and that stays right: a
+    validator that halts a trading process over a typo is a worse failure
+    than the typo. But there is a class where continuing is worse than
+    stopping — trading with no credentials, or in a mode nobody confirmed.
+
+    So the escalation is not "block boot", it is "block ENTRIES". The process
+    still boots, still reconciles, still MANAGES AND EXITS open positions.
+    Refusing to boot would strand an open book with no manager, which is the
+    one outcome worse than not trading.
+    """
+    bad = []
+    key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
+    sec = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
+    if not key or not sec:
+        bad.append("no broker credentials — cannot place or verify orders")
+    base = (os.getenv("APCA_API_BASE_URL") or "").lower()
+    paper_flag = (os.getenv("ALPACA_PAPER", "true").strip().lower()
+                  not in ("false", "0", "no", "off"))
+    if base and "paper" not in base and paper_flag:
+        bad.append(f"APCA_API_BASE_URL={base!r} is a LIVE endpoint while "
+                   f"ALPACA_PAPER says paper — the two disagree about whether "
+                   f"this is real money")
+    if not paper_flag and os.getenv("LIVE_TRADING_CONFIRMED", "").strip() != "yes":
+        bad.append("ALPACA_PAPER=false but LIVE_TRADING_CONFIRMED is not "
+                   "'yes' — real-money trading requires an explicit second "
+                   "confirmation")
+    enabled = (os.getenv("ENABLED_SYSTEMS") or "").strip()
+    if enabled and not any(d in enabled for d in
+                           ("swing", "intraday", "meanrev", "xsectmom")):
+        bad.append(f"ENABLED_SYSTEMS={enabled!r} names no known desk")
+    return bad
+
+
+def config_hash() -> tuple:
+    """(hash, [the settings it covers]) — a fingerprint of the ACTIVE config.
+
+    Answers a question the logs could not: six weeks from now, looking at
+    trade #1842, what configuration produced it? Boot banners scroll away and
+    Railway variables change without leaving a mark in the trade record.
+
+    Hashes the RESOLVED value of every KNOWN variable — the value in force,
+    not the code default — so two boots with the same hash ran the same
+    machine. A changed hash is the signal to go look at what moved.
+
+    Excludes secrets by name so the fingerprint can be logged and pasted
+    freely; rotating an API key must not look like a config change.
+    """
+    import hashlib
+    secret_ish = ("KEY", "SECRET", "TOKEN", "PASSWORD", "WEBHOOK", "DSN")
+    pairs = []
+    for name in sorted(KNOWN):
+        if any(s in name for s in secret_ish):
+            continue
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            continue                     # unset = the code default
+        pairs.append(f"{name}={raw.strip()}")
+    blob = "\n".join(pairs).encode()
+    return hashlib.sha256(blob).hexdigest()[:8].upper(), pairs
 
 
 def audit_known(repo_files: list = None) -> list:
@@ -234,6 +299,9 @@ def audit_known(repo_files: list = None) -> list:
         read |= set(_re.findall(r'_[fisb]\(\s*["\']([A-Z_0-9]+)["\']', src))
     return sorted(read - KNOWN - set(ALIASES) - set(DEAD)
                   - {"RAILWAY_DEPLOYMENT_ID"})
+
+
+ENTRIES_BLOCKED: list = []      # set by validate(); read by main.py
 
 
 def validate() -> tuple[int, int]:
@@ -382,6 +450,29 @@ def validate() -> tuple[int, int]:
                          + " — they cannot be range-checked or typo-detected "
                            "until they are added to KNOWN.")
     except Exception:  # noqa: BLE001 — a self-audit must never block boot
+        pass
+
+    # ---- FATAL INVARIANTS: block ENTRIES, never boot ---------------------
+    _fatal = []
+    try:
+        _fatal = fatal_invariants()
+    except Exception:  # noqa: BLE001
+        pass
+    ENTRIES_BLOCKED[:] = _fatal
+    for f in _fatal:
+        errors.append(f"FATAL: {f}")
+    if _fatal:
+        log.critical("ENTRIES BLOCKED — %d fatal invariant(s) failed. The "
+                     "process will boot, reconcile and MANAGE OPEN POSITIONS, "
+                     "but will open nothing new until these are fixed: %s",
+                     len(_fatal), "; ".join(_fatal))
+
+    # ---- CONFIG FINGERPRINT ---------------------------------------------
+    try:
+        _h, _pairs = config_hash()
+        infos.append(f"CONFIG_HASH={_h} ({len(_pairs)} variables set; unset "
+                     f"variables use code defaults and are excluded)")
+    except Exception:  # noqa: BLE001
         pass
 
     # ---- can the registry CARRY everything the sweep can promote? -------
