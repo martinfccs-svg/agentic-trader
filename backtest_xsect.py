@@ -58,6 +58,24 @@ import math
 import os
 import statistics
 import sys
+
+# LINE-BUFFER STDOUT (2026-08-07). Python block-buffers stdout when it is not
+# a TTY — which in a container it never is — so output sits in a 4-8KB buffer
+# until the buffer fills or the PROCESS EXITS.
+#
+# That was survivable until _park_if_service() was added to stop Railway
+# restart-looping a completed run. Parking means the process never exits,
+# which means the buffer never flushes: a backtest that ran correctly for
+# three days and printed absolutely nothing. The fix for one problem created
+# the other.
+#
+# Done in code rather than relying on PYTHONUNBUFFERED so it holds wherever
+# this runs, including a shell that forgets to set it.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):   # pragma: no cover - older/odd streams
+    pass
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -95,7 +113,12 @@ def fetch_bars(symbols, days):
         chunk, page = symbols[i:i + 50], None
         while True:
             params = {"symbols": ",".join(chunk), "timeframe": "1Day",
-                      "start": start, "limit": 10000, "adjustment": "split"}
+                      "start": start, "limit": 10000,
+                      # SPLIT-ONLY to match live signal generation; see the
+                      # note in backtest_swing_v2.fetch_bars. Total return is
+                      # correct for the BENCHMARK, not for the series the
+                      # strategy's own indicators are computed from.
+                      "adjustment": "split"}
             if page:
                 params["page_token"] = page
             r = requests.get(f"{STOCK_DATA}/bars", params=params, headers=h,
@@ -205,6 +228,9 @@ def replay(px, dates, syms, top_n, lookback, skip, cap, cost, spy_close,
         "monoculture%": monoculture_days / days_counted * 100
         if days_counted else 0,
         "risk_off_days": risk_off_days,
+        # Daily return series, for block resampling. Not printed — carried
+        # so research_framework can ask how fragile the result is.
+        "_returns": rets,
     }
 
 
@@ -302,6 +328,7 @@ def main():
 
     cols = ["total", "cagr", "sharpe", "maxdd", "turnover/yr",
             "avg_sectors", "monoculture%", "risk_off_days"]
+    # keys prefixed "_" are carried for analysis, never tabulated
     print(f"{'variant':<26}" + "".join(f"{c:>14}" for c in cols))
     print("-" * 140)
     for name, st in rows.items():
@@ -311,6 +338,92 @@ def main():
             row += (f"{v:>13.1%} " if c in ("total", "cagr", "maxdd")
                     else f"{v:>13.1f} ")
         print(row)
+    # ---- ROBUSTNESS + PROMOTION, via the shared framework -------------
+    try:
+        import research_framework as rf
+        print(f"\n{'='*140}\nMONTE CARLO — how fragile is each variant?"
+              f"\n{'='*140}")
+        print(f"{'variant':<26}{'p05 total':>14}{'p50 total':>14}"
+              f"{'p95 total':>14}{'p05 drawdown':>16}{'P(lose)':>10}")
+        print("-" * 140)
+        mc = {}
+        for name, st in rows.items():
+            r = st.get("_returns")
+            if not r:
+                continue
+            # BLOCK resampling, not iid: momentum trends and reverses in
+            # runs, and breaking them understates drawdown in the dangerous
+            # direction.
+            m = rf.monte_carlo_returns(r, iters=1200, block=10)
+            if m:
+                mc[name] = m
+                print(f"{name:<26}{m['p05']:>13.1%} {m['p50']:>13.1%} "
+                      f"{m['p95']:>13.1%} {m['dd_p05']:>15.1%} "
+                      f"{m['prob_loss']:>9.0%}")
+        print("-" * 140)
+        print("  Blocks of 10 trading days keep rotations intact. Judge on the")
+        print("  5th percentile — the median is the outcome you hope for.")
+
+        # PROMOTION RULES for THIS harness's question, which is not swing's.
+        # Swing asks "promote this exit?"; xsect asks "does the cap help?" —
+        # and the honest test is whether it buys diversification at an
+        # acceptable cost, not whether it wins on return.
+        # Keys are "<universe>/<cap>[/regime]" — e.g. "base/uncapped",
+        # "base/cap1" — NOT bare "uncapped"/"cap1". The first version looked
+        # up the bare names, found nothing, and the whole promotion block
+        # SILENTLY did not run: no error, no output, just an absent section
+        # nobody would notice was missing. Same fail-open shape as the RS
+        # exit with no benchmark and the harness that skipped its own gates.
+        def _pick(suffix):
+            for k in rows:
+                if k.endswith("/" + suffix) and "/regime" not in k:
+                    return rows[k], k
+            return None, None
+        base, base_k = _pick("uncapped")
+        cap, cap_k = _pick("cap1")
+        if not (base and cap):
+            print(f"\n  (cap comparison skipped: could not find both an "
+                  f"uncapped and a cap1 variant among {sorted(rows)[:4]}...)")
+        if base and cap:
+            print(f"\n{'='*140}\nDOES THE SECTOR CAP EARN ITS COST?"
+                  f"  ({base_k} vs {cap_k})\n{'='*140}")
+            mono_cut = base["monoculture%"] - cap["monoculture%"]
+            dd_gain = abs(base["maxdd"]) - abs(cap["maxdd"])
+            sharpe_cost = cap["sharpe"] - base["sharpe"]
+            ok, lines = rf.check_promotion([
+                ("monoculture days reduced", mono_cut > 0,
+                 f"{base['monoculture%']:.1f}% -> {cap['monoculture%']:.1f}%",
+                 "any reduction"),
+                ("max drawdown improved", dd_gain > 0,
+                 f"{base['maxdd']:.1%} -> {cap['maxdd']:.1%}", "improvement"),
+                ("Sharpe cost acceptable", sharpe_cost >= -0.30,
+                 f"{sharpe_cost:+.2f}", ">= -0.30"),
+            ])
+            for ln in lines:
+                print(ln)
+            print(f"\n    VERDICT: {'the cap earns its cost' if ok else 'the cap costs more than it buys ON THIS WINDOW'}")
+            print("    Note: a window dominated by one sector's rally is the")
+            print("    hardest possible test for a diversification rule —")
+            print("    trailing there is the cap working, not failing.")
+
+        path = rf.write_experiment(
+            "xsect",
+            {"universe_size": len(syms), "days": a.days,
+             "cost_bps": a.cost_bps,
+             "results": {k: {c: v[c] for c in cols} for k, v in rows.items()},
+             "monte_carlo": mc},
+            rf.UNIVERSE_BIASES + [
+                "equal weighting, not the live portfolio_manager sizing — "
+                "replay concentration differs from production.",
+                "instant daily rebalance: no partial turnover, participation "
+                "limits or queue position.",
+            ],
+            seeds={"monte_carlo": 17})
+        if path:
+            print(f"\n  structured record -> {path}")
+    except Exception as e:  # noqa: BLE001 — analysis must not break the run
+        print(f"\n  (robustness analysis unavailable: {e})")
+
     print("\nHow to read: monoculture% is the share of days the uncapped "
           "top-3 was ONE sector three times over — the number the cap "
           "exists to kill. Judge cap1 on maxdd and Sharpe across BOTH "
