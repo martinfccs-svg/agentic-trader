@@ -62,6 +62,24 @@ import math
 import os
 import statistics
 import sys
+
+# LINE-BUFFER STDOUT (2026-08-07). Python block-buffers stdout when it is not
+# a TTY — which in a container it never is — so output sits in a 4-8KB buffer
+# until the buffer fills or the PROCESS EXITS.
+#
+# That was survivable until _park_if_service() was added to stop Railway
+# restart-looping a completed run. Parking means the process never exits,
+# which means the buffer never flushes: a backtest that ran correctly for
+# three days and printed absolutely nothing. The fix for one problem created
+# the other.
+#
+# Done in code rather than relying on PYTHONUNBUFFERED so it holds wherever
+# this runs, including a shell that forgets to set it.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):   # pragma: no cover - older/odd streams
+    pass
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -628,6 +646,13 @@ def sweep_exits(a):
     print(f"Universe: {len(base)} symbols from {src}")
     windows = [365, 730]
     results, trade_lists, curves = {}, {}, {}
+    # PROGRESS. A sweep is 2 windows x 9 variants and takes minutes; without
+    # this the log shows nothing at all until the final report, which is
+    # indistinguishable from a hung process. Each line is one unit of work.
+    _total = len(windows) * len(EXIT_VARIANTS)
+    _done = 0
+    print(f"Sweep: {len(windows)} window(s) x {len(EXIT_VARIANTS)} variant(s) "
+          f"= {_total} runs", flush=True)
     for days in windows:
         print(f"\n=== fetching {days}d window ===")
         fetch_syms = base + (["SPY"] if "SPY" not in base else [])
@@ -642,6 +667,12 @@ def sweep_exits(a):
             results[(days, name)] = stats(curve, trades, years)
             trade_lists[(days, name)] = trades
             curves[(days, name)] = curve
+            _done += 1
+            _st = results[(days, name)]
+            print(f"  [{_done}/{_total}] {days}d {name:<16} "
+                  f"trades={len(trades):<4} "
+                  f"sharpe={_st.get('sharpe', float('nan')):>6.2f} "
+                  f"maxdd={_st.get('maxdd', float('nan')):>7.1%}", flush=True)
 
     for days in windows:
         print(f"\n{'='*92}\n{days}-DAY WINDOW\n{'='*92}")
@@ -795,14 +826,14 @@ def sweep_exits(a):
         ],
     }
     try:
-        with open(f"BACKTEST_EXPERIMENT_{stamp}.json", "w",
-                  encoding="utf-8") as fh:
+        _ep = os.path.join(_out_dir(), f"BACKTEST_EXPERIMENT_{stamp}.json")
+        with open(_ep, "w", encoding="utf-8") as fh:
             json.dump(_exp, fh, indent=2, default=str)
-        print(f"\n  structured record -> BACKTEST_EXPERIMENT_{stamp}.json")
+        print(f"\n  structured record -> {_ep}", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"  could not write the experiment record: {e}")
 
-    path = f"BACKTEST_RESULTS_{stamp}.md"
+    path = os.path.join(_out_dir(), f"BACKTEST_RESULTS_{stamp}.md")
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(_markdown_report(results, windows, a, stamp))
@@ -1216,6 +1247,35 @@ def main():
           "aren't earning their costs.")
 
 
+def _out_dir() -> str:
+    """Where results should be written so they SURVIVE a redeploy.
+
+    A container filesystem is ephemeral: BACKTEST_RESULTS_*.md written to the
+    working directory disappears the next time the service is rebuilt. So a
+    sweep could run correctly, produce a real answer, and lose it — which is
+    a worse failure than not running, because it looks like it worked.
+
+    /data is the persisted volume this project already uses for position
+    state and the beartrend repository. Falls back to the working directory
+    when there is no volume, which is the local case.
+    """
+    import os
+    for cand in (os.getenv("BACKTEST_OUT_DIR"), "/data/research",
+                 "/data"):
+        if not cand:
+            continue
+        try:
+            os.makedirs(cand, exist_ok=True)
+            probe = os.path.join(cand, ".writable")
+            with open(probe, "w") as fh:
+                fh.write("x")
+            os.remove(probe)
+            return cand
+        except OSError:
+            continue
+    return "."
+
+
 def _park_if_service():
     """A completed backtest must not become a restart loop.
 
@@ -1237,6 +1297,12 @@ def _park_if_service():
         return                      # local run: exiting is correct
     if os.getenv("BACKTEST_EXIT_WHEN_DONE", "").lower() in ("1", "true", "on"):
         return                      # explicit one-off / cron: let it exit
+    # FLUSH BEFORE PARKING. Everything above this point is in the buffer,
+    # and parking is precisely the state in which it will never drain on its
+    # own. Flushing first is the difference between a readable result and
+    # three days of silence.
+    sys.stdout.flush()
+    sys.stderr.flush()
     print("\n" + "=" * 78)
     print("RUN COMPLETE — parking instead of exiting.")
     print("=" * 78)
@@ -1249,8 +1315,15 @@ def _park_if_service():
     print()
     print("  For a repeatable job use a Railway CRON or a one-off command,")
     print("  or set BACKTEST_EXIT_WHEN_DONE=true to allow a clean exit.")
+    sys.stdout.flush()
+    # A heartbeat while parked, so "still alive, already finished" is
+    # distinguishable from "hung" without reading the start time.
+    _n = 0
     while True:
         _t.sleep(3600)
+        _n += 1
+        print(f"  [parked {_n}h] run already complete — results are above. "
+              f"Stop this service when you have read them.", flush=True)
 
 
 if __name__ == "__main__":
