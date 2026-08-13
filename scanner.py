@@ -23,6 +23,7 @@ truth table is unchanged.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from config import INTRADAY, MEANREV, SWING
@@ -92,6 +93,47 @@ class PriceActionScanner:
         out: list[Signal] = []
         f = self._funnels["intraday"]
         f.start_pass(len(self._intraday_universe))
+
+        # HARD MARKET GATE, UPSTREAM (2026-08-07).
+        #
+        # The market condition — SPY above VWAP and its 50-EMA — was checked
+        # LAST, in the v2 card, after the scanner had walked the universe and
+        # the portfolio manager had sized and approved a candidate. So on a
+        # day when SPY sat below VWAP all morning, the system did full work
+        # per symbol per cycle to reach a conclusion that was knowable from
+        # ONE series before the loop started.
+        #
+        # Checking it here changes no decision — the same trades are refused —
+        # but it refuses them in one line instead of hundreds, and the log
+        # says WHY the desk is quiet instead of listing rejected names.
+        #
+        # Fails OPEN by design: if SPY data is unavailable the scan proceeds
+        # and the v2 card still enforces the gate downstream. A data outage
+        # must not silently become a second, invisible kill switch.
+        try:
+            import intraday_scoring as _isc
+            _spy = self._feed.get_intraday_bars("SPY")
+            _spy_d = self._feed.get_daily_bars("SPY")   # slow-TTL cached
+            if _spy is not None and _spy.close:
+                # BOTH series: session VWAP from intraday, EMA50 from DAILY.
+                # Passing only the intraday bars is what made this gate test
+                # a 50-MINUTE average while the card tested a ~10-week one.
+                _ok = _isc.market_ok(_spy, _spy_d)
+                if _ok is False:
+                    # Uses only the funnel API this file already exercises:
+                    # count() and finish(). An invented kill_all() would have
+                    # raised AttributeError on the first bearish morning —
+                    # a gate that only fails when it is finally needed.
+                    f.count("spy_below_vwap_or_ema50")
+                    log.info("INTRADAY SCAN SKIPPED: SPY is below VWAP or its "
+                             "50-EMA, so no intraday entry can qualify. %d "
+                             "symbols not evaluated.",
+                             len(self._intraday_universe))
+                    f.finish(0)
+                    return out
+        except Exception as e:  # noqa: BLE001 — never let the gate stop a scan
+            log.debug("intraday market pre-gate unavailable (%s) — scanning "
+                      "anyway; the v2 card still enforces it", e)
         for t in self._intraday_universe:
             bars = self._feed.get_intraday_bars(t)
             if bars is None or len(bars.close) < INTRADAY.opening_range_min + 1:
@@ -112,8 +154,23 @@ class PriceActionScanner:
             if not rv >= INTRADAY.min_rel_volume:
                 continue
             f.count("vol_confirm")
+            # PRICE AT SCAN TIME (2026-08-07), carried on the signal.
+            #
+            # The engine measures entry slippage as fill vs signal price. It
+            # was falling back to the quote read at ENGINE time — after
+            # scoring, sizing and portfolio checks — so the "slippage" was
+            # fill-vs-fill and structurally near zero. It would have looked
+            # like execution was clean while telling you nothing.
+            #
+            # This is the price the scanner actually decided on. The gap
+            # between it and the fill is the number worth watching: it spans
+            # scan -> score -> size -> portfolio -> submit -> fill, which is
+            # the whole latency path, not just the broker's part.
             out.append(Signal(SignalSource.MOMENTUM, t,
-                              reason=f"close>{orh:.2f} ORH, >VWAP, rv={rv:.2f}"))
+                              reason=f"close>{orh:.2f} ORH, >VWAP, rv={rv:.2f}",
+                              raw={"scan_price": close, "orh": orh,
+                                   "vwap": vw, "rv": rv,
+                                   "scan_ts": time.time()}))
         f.finish(len(out))
         return out
 
