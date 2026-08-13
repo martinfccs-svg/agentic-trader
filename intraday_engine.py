@@ -8,6 +8,7 @@ Tight ATR stop, percentage trailing exit, HARD EOD flatten.
 from __future__ import annotations
 
 import logging
+import time
 import os
 
 import audit
@@ -22,6 +23,21 @@ from models import Action, Signal, System
 from risk import position_size
 
 log = logging.getLogger("intraday")
+
+_CFG_HASH = None
+
+
+def _cfg_hash() -> str:
+    """Config fingerprint, cached. Same value swing_engine stamps — sourced
+    from config_check so there is ONE definition of what the hash covers."""
+    global _CFG_HASH
+    if _CFG_HASH is None:
+        try:
+            import config_check
+            _CFG_HASH = config_check.config_hash()[0]
+        except Exception:  # noqa: BLE001
+            _CFG_HASH = "unknown"
+    return _CFG_HASH
 
 # ---------------------------------------------------------------------------
 # RE-ACTIVATION GATE (2026-07-23). Intraday was benched Jul 8 for negative-
@@ -152,9 +168,6 @@ class IntradayRiskEngine:
             self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK,
                              f"portfolio manager: {_pdec}")
             return
-        if shares <= 0:
-            self._log.record(signal, System.INTRADAY, Action.REJECTED_BY_RISK, "size=0")
-            return
         # v2 scorecard (2026-07-23): computed for EVERY qualified signal so
         # each shadow line carries both the v6 verdict (would_trade) and the
         # v2 score — one record, two strategies' evidence. Uses only data
@@ -164,6 +177,10 @@ class IntradayRiskEngine:
         try:
             spy_q = self._feed.get_quote("SPY")
             spy_i = self._feed.get_intraday_bars("SPY")
+            # Same ROLLING window as the stock leg (INTRADAY_LOOKBACK_MIN,
+            # 240m by default) — NOT the session open, despite the name. Kept
+            # symmetric with the stock side on purpose: both legs must span
+            # the same interval or the relative read is meaningless.
             spy_open_ret = (spy_i.close[-1] / spy_i.close[0] - 1) \
                 if spy_i and spy_i.close else None
             spy_d = self._feed.get_daily_bars("SPY")   # slow-TTL cached
@@ -242,9 +259,35 @@ class IntradayRiskEngine:
                                  Action.REJECTED_BY_RISK,
                                  "size=0 (v2 stop/tier)")
                 return
+
+            # ---- PORTFOLIO MANAGER, AGAIN, ON THE FINAL NUMBERS ----------
+            # (2026-08-07) The bypass this closes: the portfolio manager ran
+            # ABOVE on the v6 stop, then this branch replaced the stop,
+            # RE-SIZED from scratch and applied a conviction tier. The order
+            # that reached the broker had never been seen by heat, sector,
+            # concentration, correlation, regime or the notional cap.
+            #
+            # It is not a rounding difference. Sizing is risk_budget /
+            # stop_distance, so halving the stop distance DOUBLES the shares:
+            # a v6 stop $4 away and a v2 stop $2 away produce 2x the position
+            # the portfolio manager approved, silently.
+            #
+            # "ONE decision point" has to mean the decision that produces the
+            # ORDER, not an earlier draft of it. Re-running is cheap; the
+            # stages are pure functions of the current book.
+            _v2_before = shares
+            shares, _pdec2 = portfolio_manager.apply(
+                shares, self._feed, self._broker, signal.ticker,
+                System.INTRADAY, q.price, stop, self._broker.equity)
+            if shares <= 0:
+                self._log.record(signal, System.INTRADAY,
+                                 Action.REJECTED_BY_RISK,
+                                 f"portfolio manager (v2 resize): {_pdec2}")
+                return
             log.info("intraday v2-live sizing %s: stop=%.2f (structure) "
-                     "tier=%.2f shares=%.2f score=%.2f", signal.ticker,
-                     stop, tier, shares, card.score)
+                     "tier=%.2f shares=%.2f (portfolio: %.2f -> %.2f) "
+                     "score=%.2f", signal.ticker, stop, tier, shares,
+                     _v2_before, shares, card.score)
 
         if not INTRADAY_ENTRIES:
             # Full dry-run complete; withhold only the order. Mirrored to the
@@ -287,11 +330,67 @@ class IntradayRiskEngine:
             try:
                 _p = " ".join(f"{k}={v:.3f}" for k, v in
                               sorted(card.parts.items(), key=lambda x: -x[1]))
+                # ENTRY SLIPPAGE (2026-08-07). The question the P&L cannot
+                # answer: are the losses BAD SIGNALS or GOOD SIGNALS FILLED
+                # BADLY? Those need opposite fixes — tighter gates versus a
+                # different entry trigger — and nothing recorded the gap
+                # between the price the score was computed on and the price
+                # actually paid.
+                #
+                # Signed so the sign means something: POSITIVE bps = paid
+                # MORE than the signal price, which is the direction that
+                # hurts a long.
+                # Prefer the SCANNER's price. `signal.price` does not exist
+                # on this model, so the old expression fell through to
+                # q.price — the quote read here, after scoring and sizing —
+                # making the measurement fill-vs-fill and always ~0 bps.
+                _raw = getattr(signal, "raw", None) or {}
+                _sig_px = _raw.get("scan_price") or q.price
+                _lat = (time.time() - _raw["scan_ts"]) if _raw.get("scan_ts") \
+                    else None
+                _slip_bps = (((pos.entry_price - _sig_px) / _sig_px) * 10000.0
+                             if _sig_px else 0.0)
                 log.warning("INTRADAY ACCEPTED %s: score=%.3f (min %.2f) | %s "
-                            "| stop=%.2f shares=%.2f", signal.ticker,
-                            card.score, ids.SCORE_MIN, _p, stop, shares)
+                            "| scan=%.4f fill=%.4f slip=%+.1fbps lat=%s "
+                            "stop=%.2f shares=%.2f", signal.ticker,
+                            card.score, ids.SCORE_MIN, _p, _sig_px,
+                            pos.entry_price, _slip_bps,
+                            f"{_lat:.1f}s" if _lat is not None else "?",
+                            stop, shares)
+                audit.record("intraday_entry", notify=False,
+                             ticker=signal.ticker,
+                             score=round(card.score, 4),
+                             score_min=ids.SCORE_MIN,
+                             parts={k: round(v, 4)
+                                    for k, v in card.parts.items()},
+                             signal_price=round(_sig_px, 4),
+                             fill_price=round(pos.entry_price, 4),
+                             slippage_bps=round(_slip_bps, 2),
+                             scan_to_fill_secs=(round(_lat, 2)
+                                                if _lat is not None else None),
+                             stop=round(stop, 4), shares=round(shares, 4),
+                             rv=card.parts.get("rel_volume"),
+                             window=ids.excluded_region() or "in_window",
+                             config_hash=_cfg_hash())
             except Exception:  # noqa: BLE001 — telemetry must not block a fill
                 pass
+
+    def _track_excursion(self, ticker, pos, price):
+        """Worst and best price seen WHILE HELD, recorded on the position.
+
+        Completes the entry->exit lifecycle. Slippage alone says what the
+        fill cost; MAE says whether the trade went against you immediately
+        after it (an entry-trigger problem) or drifted later (an exit
+        problem). Those are different diagnoses with different fixes, and
+        the P&L conflates them.
+        """
+        try:
+            if getattr(pos, "mae_price", None) is None:
+                pos.mae_price = pos.mfe_price = pos.entry_price
+            pos.mae_price = min(pos.mae_price, price)
+            pos.mfe_price = max(pos.mfe_price, price)
+        except Exception:  # noqa: BLE001
+            pass
 
     def manage_open_positions(self):
         # First, book any positions whose bracket legs filled broker-side.
