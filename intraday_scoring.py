@@ -46,7 +46,7 @@ Jul-8 churn diagnosis): after a losing intraday exit, the ticker is
 untradeable for COOLDOWN_MIN minutes. Engine calls note_loss()/in_cooldown().
 
 Env:
-  INTRADAY_SCORE_MIN     default 0.70 (live mode threshold; shadow logs all)
+  INTRADAY_SCORE_MIN     default 0.65 (live mode threshold; shadow logs all)
   INTRADAY_RV_GATE       default 2.0
   INTRADAY_COOLDOWN_MIN  default 45
 """
@@ -60,7 +60,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
-from indicators import ema  # canonical (2026-08-02)
+from indicators import ema, vwap  # canonical (2026-08-02)
 
 ET = ZoneInfo("America/New_York")
 
@@ -129,6 +129,48 @@ if not (SESSION_OPEN_ET < BREAK_START_ET < BREAK_END_ET < SESSION_CLOSE_ET):
 
 WINDOWS_ET = ((SESSION_OPEN_ET, BREAK_START_ET),
               (BREAK_END_ET, SESSION_CLOSE_ET))
+
+
+def market_ok(spy_intraday, spy_daily=None) -> Optional[bool]:
+    """SPY above session VWAP AND above its DAILY 50-EMA. True/False/None.
+
+    CORRECTED 2026-08-07, and the bug is worth recording because the comment
+    claimed the opposite of what the code did.
+
+    The first version took only intraday bars and computed ema(closes, 50) on
+    them — a 50-MINUTE average. The downstream v2 card computed EMA50 on
+    DAILY bars, a ~10-week average. Two gates, the same name, the same
+    "ONE definition" comment, testing conditions that can trivially disagree:
+    SPY can sit above a 50-minute average while well below its daily 50-EMA
+    on any morning bounce in a downtrend.
+
+    So the upstream gate would pass, the whole universe would be scanned, and
+    the card would then reject every candidate — the exact waste the pre-gate
+    was built to remove, with a comment asserting it could not happen.
+
+    The daily EMA50 is the intended condition: "no intraday longs when SPY is
+    below its daily 50-EMA". Both callers now pass BOTH series.
+
+    None means unknowable (missing data), which is NOT False: the pre-gate
+    proceeds on None so an outage cannot become an invisible kill switch.
+    """
+    try:
+        closes = list(spy_intraday.close) if spy_intraday else []
+        if not closes:
+            return None
+        vw = vwap(spy_intraday)
+        if vw is None:
+            return None
+        if closes[-1] <= vw:
+            return False              # below session VWAP: settled
+        if spy_daily is None or len(getattr(spy_daily, "close", [])) < 50:
+            return None               # cannot judge the daily leg
+        e50 = ema(list(spy_daily.close), 50)
+        if e50 is None:
+            return None
+        return bool(closes[-1] > e50)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def schedule_text() -> str:
@@ -212,6 +254,13 @@ class IntradayCard:
     score: float
     parts: dict
     v2_stop: Optional[float] = None   # structure stop (shadow evidence)
+    # When this card was scored, so window attribution uses the decision
+    # time rather than whenever the log line is written.
+    scored_at: Optional[datetime] = None
+    # How many timeframes the MTF factor could actually measure (1-3).
+    # Below 3 the factor is a partial read; segment on this before trusting
+    # any score calibration.
+    mtf_available: int = 0
 
     @property
     def gates_ok(self) -> bool:
@@ -240,8 +289,18 @@ class IntradayCard:
 
     @property
     def blocked_region(self) -> Optional[str]:
-        """Which exclusion stopped it — so the evidence names the region."""
-        return excluded_region() if not self.gate_window else None
+        """Which exclusion stopped it, at the time the CARD was scored.
+
+        Was `excluded_region()` with no argument — wall-clock at the moment
+        the property happened to be read, not when the decision was made.
+        Usually the same second, but a card scored at 10:59:58 and logged at
+        11:00:01 would be attributed to the midday break it did not hit. The
+        window experiment is the thing this data feeds, so an attribution
+        that is right "almost always" is the wrong kind of right.
+        """
+        if self.gate_window:
+            return None
+        return excluded_region(self.scored_at)
 
     def qualifies(self, score_min: float = SCORE_MIN) -> bool:
         return self.gates_ok and self.score >= score_min
@@ -258,6 +317,11 @@ def score_intraday(ticker: str,
                    now: Optional[datetime] = None) -> Optional[IntradayCard]:
     """spy_open_ret = SPY's return since today's open (for rel strength).
     Returns None only if 1-min history is too thin to say anything."""
+    # The SUPPLIED time when there is one — gate_window already uses `now`,
+    # so stamping wall-clock here would make a replayed or historical card
+    # gate on one timestamp and be attributed to another. That is exactly the
+    # contamination the scored_at field was added to prevent.
+    _now = now.astimezone(ET) if now is not None else datetime.now(ET)
     if len(closes_1m) < 30:
         return None
 
@@ -275,13 +339,33 @@ def score_intraday(ticker: str,
     gate_volband = atr_pct is not None and ATR_PCT_MIN <= atr_pct <= ATR_PCT_MAX
 
     parts: dict[str, float] = {}
-    # multi-TF alignment (local resample; zero extra API calls)
+    # ---- MULTI-TIMEFRAME ALIGNMENT ------------------------------------
+    # CORRECTED 2026-08-07. The denominator was a hardcoded 3, and _aligned()
+    # returns None when there is not enough history for EMA20. None is falsy,
+    # so an UNCOMPUTABLE timeframe counted exactly like a MISALIGNED one:
+    #
+    #     5m EMA20 needs  20 x 5  = 100 one-minute bars
+    #     15m EMA20 needs 20 x 15 = 300 one-minute bars
+    #
+    # but the function admits candidates at 30 bars. So the same stock at the
+    # same price scored 0.083 at 09:55 and 0.250 at 11:00 — the score moved
+    # because the FEED returned more history, not because the setup changed.
+    # Any calibration built on that is calibrating the data window.
+    #
+    # Now the denominator is what could actually be MEASURED. A timeframe
+    # that cannot be computed is excluded, not failed. `mtf_available` is
+    # recorded so the analysis can segment by it rather than trusting a
+    # number whose meaning drifts through the session.
     a1 = _aligned(closes_1m)
     c5, h5, l5, v5 = resample(closes_1m, highs_1m, lows_1m, vols_1m, 5)
     c15, *_ = resample(closes_1m, highs_1m, lows_1m, vols_1m, 15)
     a5, a15 = _aligned(c5), _aligned(c15)
-    n_aligned = sum(1 for a in (a1, a5, a15) if a)
-    parts["mtf_alignment"] = 0.25 * (n_aligned / 3.0)
+    _tfs = [a for a in (a1, a5, a15) if a is not None]
+    _n_avail = len(_tfs)
+    _n_aligned = sum(1 for a in _tfs if a)
+    parts["mtf_alignment"] = (0.25 * (_n_aligned / _n_avail)
+                              if _n_avail else 0.0)
+    mtf_available = _n_avail
     # relative volume, scaled 2.0 -> 0 .. 4.0 -> full
     parts["rel_volume"] = 0.20 * max(0.0, min(1.0, (rv - 2.0) / 2.0))
     # VWAP position: above but not extended
@@ -292,9 +376,26 @@ def score_intraday(ticker: str,
     else:
         parts["vwap_position"] = 0.0
     # relative strength vs SPY since open
-    stock_open_ret = closes_1m[-1] / closes_1m[0] - 1
+    # ---- RELATIVE STRENGTH: what this ACTUALLY measures ----------------
+    # (2026-08-07) Named `*_open_ret`, and the docstring said "since open".
+    # It is not. get_intraday_bars fetches a ROLLING window —
+    # `now - INTRADAY_LOOKBACK_MIN * 60`, 240 minutes by default — so
+    # closes_1m[0] is the price four hours ago, which before roughly 13:30 is
+    # pre-market and after it is mid-session. Never the 09:30 open.
+    #
+    # THE COMPARISON IS STILL SOUND: the SPY leg is computed from the same
+    # feed with the same window, so both sides measure the same interval and
+    # the relative read is meaningful. What was wrong is the LABEL — and a
+    # factor whose name misdescribes it is how someone later "fixes" it into
+    # something that no longer matches its SPY counterpart.
+    #
+    # Renamed to say what it does. Making it genuinely session-anchored would
+    # require a feed change (fetch from the session open, not a rolling
+    # window) and would change every score — a measurement change to make
+    # while nothing else is moving, not alongside four other corrections.
+    stock_window_ret = closes_1m[-1] / closes_1m[0] - 1
     parts["rel_strength"] = (0.20 if spy_open_ret is not None
-                             and stock_open_ret > spy_open_ret else 0.0)
+                             and stock_window_ret > spy_open_ret else 0.0)
     # pullback quality: EMA9 tagged within last 3 bars, close back above
     e9 = ema(closes_1m, 9)
     if e9 is not None:
@@ -303,14 +404,34 @@ def score_intraday(ticker: str,
     else:
         parts["pullback"] = 0.0
 
-    # v2 structure stop (reviewer #5, bounded): below the tightest nearby
-    # structure — min(last-5 low, 1-min EMA20) — minus 0.25 ATR, but never
-    # wider than 2.5 x ATR from price (raw min() picks the WIDEST support,
-    # so unbounded it can put the stop in the basement). Logged in shadow
-    # next to v6's plain 2.5xATR stop so the better stop wins on data.
+    # v2 STRUCTURE STOP — CONSERVATIVE by choice, bounded by ATR.
+    #
+    # WORDING CORRECTED 2026-08-07. This said "below the tightest nearby
+    # structure" while computing min(...), which selects the LOWEST/FARTHEST
+    # support, not the tightest. The behaviour is deliberate — the same
+    # comment noted that raw min() picks the widest support — but the opening
+    # phrase described the opposite policy, which is how a later reader
+    # "fixes" working code in the wrong direction.
+    #
+    # The policy, stated plainly:
+    #   * take the LOWEST of (5-bar low, 1-min EMA20) — the farther support
+    #   * subtract 0.25 ATR of headroom below it
+    #   * never let the result sit more than 2.5 x ATR from price
+    #
+    # Conservative on purpose: a stop placed at the TIGHTER support is hit by
+    # the ordinary noise the 5-bar low is measuring, which converts a viable
+    # trade into a stop-out plus a 45-minute cooldown. The ATR cap stops the
+    # conservatism running away.
+    #
+    # WHICH POLICY IS BETTER IS A DATA QUESTION, and the machinery to answer
+    # it already runs: v2_stop is logged in shadow beside v6's plain 2.5xATR
+    # stop, and MAE per trade says which one the price actually reached.
+    # Not changed on theory.
     v2_stop = None
     if intra_atr and e9 is not None:
         e20_1m = ema(closes_1m, 20)
+        # min() = the FARTHER support. See the policy note above; this is
+        # the conservative choice, not an oversight.
         structure = min(min(lows_1m[-5:]),
                         e20_1m if e20_1m is not None else min(lows_1m[-5:]))
         v2_stop = max(structure - 0.25 * intra_atr,
@@ -319,7 +440,8 @@ def score_intraday(ticker: str,
 
     return IntradayCard(ticker, gate_window, gate_market, gate_rv,
                         gate_volband, round(sum(parts.values()), 3), parts,
-                        v2_stop=v2_stop)
+                        v2_stop=v2_stop, scored_at=_now,
+                        mtf_available=mtf_available)
 
 
 # ------------------------------------------------------------- cooldown
