@@ -112,10 +112,59 @@ class ScoreCard:
     score: int               # 0..6 confirmations
     factors: dict            # name -> bool (for logs/backtest attribution)
     ema200: Optional[float]  # reused by the exit ladder (trend reversal)
+    # Reversal confirmation, kept OUT of `score` so the 0-6 scale and the
+    # tuned MEANREV_SCORE_MIN keep their meaning.
+    reversal_ok: bool = False
+    reversal_why: str = ""
 
     def qualifies(self, score_min: int = SCORE_MIN) -> bool:
         # Market gate (regime) is applied by the CALLER on top of this.
         return self.trigger and self.gate_trend and self.score >= score_min
+
+
+REVERSAL_MODE = os.getenv("MEANREV_REVERSAL", "shadow").strip().lower()
+
+
+def reversal_confirmed(close: list[float], high: list[float],
+                       low: list[float]) -> tuple[bool, str]:
+    """Has the fall actually STOPPED? (confirmed, reason)
+
+    The gap this fills: all six existing factors describe the CONDITION —
+    below the lower Bollinger, ADX ranging, volume drying, ATR contracting,
+    EMA50 > EMA200, relative strength. Every one can be true while the stock
+    is still making new lows every session. So the desk can buy something
+    oversold that is becoming more oversold, which is the classic failure of
+    an RSI trigger used as an entry rather than as a screen.
+
+    Three checks, ALL required, deliberately cheap and non-parametric:
+
+        1. today's low is NOT the lowest of the last 5 sessions
+           — the sequence of lower lows has broken
+        2. today closed in the upper half of its own range
+           — buyers were present into the close, not just present
+        3. today's close is above yesterday's close
+           — the most basic possible statement that it turned
+
+    None of these predicts a reversal. Together they say the knife has
+    landed, which is a different and much weaker claim — and the right one
+    for a rule whose job is to stop buying mid-fall.
+
+    Ships in SHADOW: logged on every candidate, blocking nothing, so the
+    cost of requiring it can be counted before it is required.
+    """
+    if len(close) < 6 or len(low) < 6 or len(high) < 6:
+        return False, "insufficient_bars"
+    reasons = []
+    if low[-1] <= min(low[-5:]):
+        reasons.append("still_making_new_lows")
+    rng = high[-1] - low[-1]
+    if rng <= 0 or (close[-1] - low[-1]) / rng < 0.5:
+        reasons.append("closed_in_lower_half")
+    if close[-1] <= close[-2]:
+        reasons.append("close_not_up")
+    if reasons:
+        return False, "+".join(reasons)
+    return True, "reversal_confirmed"
 
 
 def score_candidate(ticker: str, close: list[float], high: list[float],
@@ -154,6 +203,10 @@ def score_candidate(ticker: str, close: list[float], high: list[float],
     else:
         factors["rel_strength"] = False
 
+    # Recorded SEPARATELY from `factors`, deliberately: adding a 7th factor
+    # would change the 0-6 score scale and silently invalidate
+    # MEANREV_SCORE_MIN=4, which was chosen against the current six.
+    rev_ok, rev_why = reversal_confirmed(close, high, low)
     return ScoreCard(
         ticker=ticker,
         trigger=(rsi_value is not None and rsi_value < rsi_oversold),
@@ -161,6 +214,8 @@ def score_candidate(ticker: str, close: list[float], high: list[float],
         score=sum(1 for v in factors.values() if v),
         factors=factors,
         ema200=e200,
+        reversal_ok=rev_ok,
+        reversal_why=rev_why,
     )
 
 
