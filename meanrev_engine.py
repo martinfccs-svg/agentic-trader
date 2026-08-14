@@ -8,6 +8,7 @@ correlation-checked against the momentum books (that's the whole point).
 
 from __future__ import annotations
 
+import audit
 import logging
 import os
 from datetime import date, datetime, timezone
@@ -138,6 +139,18 @@ class MeanReversionEngine:
         )
         self._log.record(signal, System.MEANREV, Action.OPENED,
                          f"{signal.reason} shares={shares:.2f} stop={stop:.2f}")
+        # WHICH CONFIG produced this trade. swing and intraday already stamp
+        # it; without meanrev and xsect the audit trail can answer "what
+        # settings ran trade #1842?" for two desks and not the other two.
+        try:
+            import config_check
+            audit.record("meanrev_entry", notify=False,
+                         ticker=signal.ticker, shares=round(shares, 2),
+                         price=round(q.price, 4), stop=round(stop, 4),
+                         reason=signal.reason,
+                         config_hash=config_check.active_hash())
+        except Exception:  # noqa: BLE001 — telemetry never blocks a fill
+            pass
 
     def manage_open_positions(self):
         if hasattr(self._broker, "reconcile_filled_legs"):
