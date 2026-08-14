@@ -210,11 +210,17 @@ class PriceActionScanner:
                                            bars.volume, r,
                                            MEANREV.rsi_oversold, spy_close)
                 if card:
+                    # reversal shown alongside the score: the six factors say
+                    # the CONDITION is oversold, this says whether the fall
+                    # has stopped. Shadow only — it blocks nothing yet, so the
+                    # cost of requiring it can be counted first.
                     card_str = ("score=%d/6 trigger=%s trend_gate=%s "
-                                "market=%s | %s" % (card.score, card.trigger,
-                                card.gate_trend, market_ok,
-                                " ".join(k for k, v in card.factors.items()
-                                         if v) or "(no factors)"))
+                                "market=%s reversal=%s(%s) | %s"
+                                % (card.score, card.trigger,
+                                   card.gate_trend, market_ok,
+                                   card.reversal_ok, card.reversal_why,
+                                   " ".join(k for k, v in card.factors.items()
+                                            if v) or "(no factors)"))
                     if _last_cards.get(t) != card_str:
                         _last_cards[t] = card_str
                         log.info("meanrev_score %s: %s", t, card_str)
