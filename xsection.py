@@ -34,6 +34,7 @@ a distinct return stream from the time-series momentum in the swing book.
 
 from __future__ import annotations
 
+import audit
 import logging
 import os
 
@@ -400,6 +401,15 @@ class CrossSectionalMomentumEngine:
             log.warning("xsect rebalance: ENTER %s x%.0f @ %.2f stop=%.2f "
                         "(ret %+.1f%%)", ticker, shares, q.price, stop,
                         ret * 100)
+            try:
+                import config_check
+                audit.record("xsect_entry", notify=False, ticker=ticker,
+                             shares=round(shares, 2),
+                             price=round(q.price, 4), stop=round(stop, 4),
+                             lookback_return=round(ret, 6),
+                             config_hash=config_check.active_hash())
+            except Exception:  # noqa: BLE001
+                pass
 
     def manage_open_positions(self):
         # Book any positions whose broker-side stop leg filled since last cycle.
