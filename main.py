@@ -161,6 +161,15 @@ def build():
         # inferred from a file nobody opened.
         for _line in _pr.describe():
             log.warning("%s", _line)
+        # WHAT EACH DESK IS ACTUALLY RUNNING, grouped and resolved. The GATES
+        # line above is dense by design; this is the one an operator reads to
+        # answer "what is meanrev doing right now?".
+        try:
+            import config_check as _cc2
+            for _line in _cc2.active_config_report():
+                log.warning("%s", _line)
+        except Exception as _e:  # noqa: BLE001
+            log.error("active config report failed (non-fatal): %s", _e)
         if _ie and "intraday" in ENABLED_SYSTEMS:
             log.critical("INTRADAY ENTRIES ARE LIVE (INTRADAY_ENTRIES "
                          "unset or true). If shadow mode was intended, set "
