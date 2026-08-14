@@ -76,6 +76,22 @@ SECTOR_MAX_PCT = float(os.getenv("SECTOR_MAX_PCT", "0"))
 # unequal split today would be a guess wearing an allocation's clothes.
 DESK_BUDGET_PCT = float(os.getenv("DESK_BUDGET_PCT", "0"))   # 0 = measure
 
+# SAME-TICKER, DIFFERENT DESKS (2026-08-13). Each desk enforces its own
+# max_positions and the notional cap is per POSITION, so swing holding NVDA
+# at 10% and meanrev buying NVDA at 10% is two legal decisions and 20% of the
+# book in one name. Neither desk can see the other; the per-position cap
+# counts them separately; and correlation — which would score a ticker
+# against itself at 1.00 — is measure-only.
+#
+# This is the "three strategies should not compete" problem in its concrete
+# form: not that the desks disagree, but that they can silently agree.
+#
+# Measure-only by default, like every other portfolio gate. When enabled it
+# CAPS the combined exposure rather than rejecting outright, because the
+# second desk's thesis may be the better one and refusing it wholesale would
+# make entry order decide the book.
+SAME_TICKER_MAX_PCT = float(os.getenv("SAME_TICKER_MAX_PCT", "0"))
+
 TOP_N = int(os.getenv("CONCENTRATION_TOP_N", "5"))
 TOP_N_MAX_PCT = float(os.getenv("CONCENTRATION_TOP_N_MAX", "0"))   # 0 = measure
 
@@ -356,6 +372,42 @@ def evaluate(shares: float, feed, broker, ticker: str, system,
                    f"top{TOP_N} {would:.1%} measure-only")
     except Exception as e:  # noqa: BLE001
         log.error("portfolio: concentration failed (%s) — failing open", e)
+
+    # ---- 2ba. SAME TICKER ACROSS DESKS ---------------------------------
+    try:
+        _have_t = 0.0
+        _holders = []
+        for _t, _p in (getattr(broker, "positions", {}) or {}).items():
+            if _t != ticker:
+                continue
+            _px = getattr(_p, "last_price", None) or _p.entry_price
+            _have_t += (_px * _p.shares) / equity if equity > 0 else 0.0
+            _holders.append(getattr(getattr(_p, "system", None), "value", "?"))
+        _adding_t = (d.shares_out * price) / equity if equity > 0 else 0.0
+        if _holders:
+            if SAME_TICKER_MAX_PCT > 0:
+                _room = SAME_TICKER_MAX_PCT - _have_t
+                if _room <= 0:
+                    d.shares_out = 0.0
+                    d.note("same_ticker", REJECT,
+                           f"{ticker} already {_have_t:.1%} via "
+                           f"{'+'.join(_holders)} >= {SAME_TICKER_MAX_PCT:.1%}")
+                    log.warning("PORTFOLIO %s", d.line())
+                    return d
+                if _adding_t > _room:
+                    d.shares_out = (_room * equity) / price
+                    d.note("same_ticker", REDUCE,
+                           f"{ticker} {_have_t:.1%} via {'+'.join(_holders)} "
+                           f"+{_adding_t:.1%} > {SAME_TICKER_MAX_PCT:.1%}")
+                else:
+                    d.note("same_ticker", ACCEPT,
+                           f"{ticker} {_have_t:.1%} via {'+'.join(_holders)}")
+            else:
+                d.note("same_ticker", ACCEPT,
+                       f"{ticker} ALREADY HELD by {'+'.join(_holders)} at "
+                       f"{_have_t:.1%}, adding {_adding_t:.1%} measure-only")
+    except Exception as e:  # noqa: BLE001
+        log.error("portfolio: same-ticker check failed (%s) — failing open", e)
 
     # ---- 2bb. DESK BUDGET ----------------------------------------------
     # Not a new layer: this is the same question as heat, sector and
