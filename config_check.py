@@ -39,7 +39,7 @@ KNOWN = {
     "ABSENT_CONFIRM_SECS", "AFTER_HOURS_INTERVAL_SECS", "ALPACA_API_KEY",
     "ALPACA_PAPER", "ALPACA_SECRET_KEY", "APCA_API_BASE_URL",
     "AUDIT_LOG_PATH", "FUNNEL_EMIT_SECS", "LIVE_TRADING_CONFIRMED",
-    "MEANREV_LOOKBACK_BARS", "NTFY_SERVER", "NTFY_TOKEN",
+    "MEANREV_LOOKBACK_BARS", "MEANREV_REVERSAL", "NTFY_SERVER", "NTFY_TOKEN",
     "REBALANCE_GATE_STATE", "SWING_LOOKBACK_BARS", "TRADES_LOG_PATH",
     "XSECT_LOOKBACK_BARS", "XSECT_REBALANCE_ET",
     "BEARTREND_ADX_MIN", "BEARTREND_APPROVAL_VALID_DAYS",
@@ -52,7 +52,7 @@ KNOWN = {
     "COMMISSION_PER_TRADE", "CONCENTRATION_TOP_N", "CONCENTRATION_TOP_N_MAX",
     "CORRELATION_BLOCK", "CORRELATION_LOOKBACK", "CORRELATION_MIN_OBS",
     "CORRELATION_MODE", "CORRELATION_WARN", "DAILY_BARS_REFRESH_CYCLES",
-    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR", "DEGRADED_AFTER_CYCLES", "DESK_BUDGET_PCT",
+    "DAILY_LOOKBACK_DAYS", "DAILY_LOSS_LIMIT", "DAILY_LOSS_PCT", "DATA_DIR", "DEGRADED_AFTER_CYCLES", "SAME_TICKER_MAX_PCT", "DESK_BUDGET_PCT",
     "DRAWDOWN_SCALING", "DRAWDOWN_STATE_PATH", "ENABLED_SYSTEMS",
     "ENTRY_SETTLE_GRACE_SECS", "FINNHUB_API_KEY", "FLATTEN_BEFORE_CLOSE_MIN",
     "INTRADAY_ATR_MULT", "INTRADAY_BREAK_END", "INTRADAY_BREAK_START",
@@ -141,6 +141,7 @@ RANGES = {
     "SECTOR_MAX_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "DEGRADED_AFTER_CYCLES": (1, 60, "consecutive failures before escalating"),
     "DESK_BUDGET_PCT": (0.0, 1.0, "fraction of equity PER DESK; 0 = MEASURE ONLY"),
+    "SAME_TICKER_MAX_PCT": (0.0, 1.0, "combined exposure to ONE ticker across desks; 0 = MEASURE ONLY"),
     "CONCENTRATION_TOP_N_MAX": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "MAX_PARTICIPATION_PCT": (0.0, 1.0, "fraction; 0 = MEASURE ONLY"),
     "CORRELATION_WARN": (0.0, 1.0, "correlation coefficient"),
@@ -161,6 +162,7 @@ RANGES = {
 
 ENUMS = {
     "BEARTREND_MODE": {"off", "shadow"},
+    "MEANREV_REVERSAL": {"off", "shadow", "live"},
     "CORRELATION_MODE": {"measure", "enforce"},
     "MEANREV_SCORING": {"off", "shadow", "live"},
     "REGIME_ALLOC": {"off", "shadow", "live"},
@@ -221,6 +223,110 @@ def fatal_invariants() -> list:
                            ("swing", "intraday", "meanrev", "xsectmom")):
         bad.append(f"ENABLED_SYSTEMS={enabled!r} names no known desk")
     return bad
+
+
+_HASH_CACHE = None
+
+
+def active_config_report() -> list:
+    """What each desk is ACTUALLY running, grouped and resolved.
+
+    The GATES banner is one dense line covering 24 settings across four
+    desks, which is fine for spotting a change and poor for answering "what
+    is meanrev doing right now?". This prints the resolved value of every
+    setting that governs a desk, grouped by desk — the value in force, not
+    the code default, so an operator reading the log sees what the machine
+    sees.
+
+    Built from the module constants rather than re-reading the environment,
+    so a variable that is set but IGNORED (wrong name, invalid enum) shows
+    its real effect here instead of its intended one.
+    """
+    out = ["", "=" * 66, "ACTIVE STRATEGY CONFIG", "=" * 66]
+
+    def sect(name, pairs):
+        out.append(f"\n  {name}")
+        for k, v in pairs:
+            out.append(f"    {k:<16} = {v}")
+
+    try:
+        import swing_v2 as _sv2
+        import position_sizing as _ps
+        from config import SWING
+        sect("SWING", [
+            ("route", "ON (swing runs swing_v2)" if _sv2.ROUTE_LIVE else "off"),
+            ("risk", f"{_ps.risk_pct('swing', 'v2' if _sv2.ROUTE_LIVE else None):.4%}"),
+            ("max_pos", SWING.max_positions),
+            ("adx_gate", f">={_sv2.ADX_MIN:g}" if _sv2.ADX_REQUIRED else "off"),
+            ("rel_strength", "on" if _sv2.RS_REQUIRED else "off"),
+            ("time_stop", f"{_sv2.TIME_STOP_DAYS}d without +1R"),
+            ("setup_expiry", f"{_sv2.SETUP_EXPIRY_DAYS}d"),
+        ])
+    except Exception as e:  # noqa: BLE001
+        out.append(f"\n  SWING (unavailable: {e})")
+
+    try:
+        import meanrev_scoring as _mrs
+        from config import MEANREV
+        sect("MEANREV", [
+            ("scoring", _mrs.SCORING_MODE),
+            ("score_min", f"{_mrs.SCORE_MIN}/6"),
+            ("reversal", _mrs.REVERSAL_MODE),
+            ("rsi_oversold", MEANREV.rsi_oversold),
+            ("max_pos", MEANREV.max_positions),
+        ])
+    except Exception as e:  # noqa: BLE001
+        out.append(f"\n  MEANREV (unavailable: {e})")
+
+    try:
+        import intraday_scoring as _isc
+        from config import INTRADAY
+        sect("INTRADAY", [
+            ("score_min", _isc.SCORE_MIN),
+            ("rv_gate", _isc.RV_GATE),
+            ("session", _isc.schedule_text()),
+            ("cooldown", f"{_isc.COOLDOWN_MIN}min after a loss"),
+            ("max_pos", INTRADAY.max_positions),
+            ("trail", f"{INTRADAY.trail_pct:.1%}"),
+        ])
+    except Exception as e:  # noqa: BLE001
+        out.append(f"\n  INTRADAY (unavailable: {e})")
+
+    try:
+        import portfolio_manager as _pm
+
+        def _mode(v, fmt="{:.0%}"):
+            return fmt.format(v) if v > 0 else "0 (MEASURE ONLY)"
+        sect("PORTFOLIO", [
+            ("heat_max", _mode(_pm.HEAT_MAX)),
+            ("sector_max", _mode(_pm.SECTOR_MAX_PCT)),
+            ("desk_budget", _mode(_pm.DESK_BUDGET_PCT)),
+            ("same_ticker", _mode(_pm.SAME_TICKER_MAX_PCT)),
+            ("top_n_max", _mode(_pm.TOP_N_MAX_PCT)),
+            ("participation", _mode(_pm.MAX_PARTICIPATION, "{:.2%}")),
+            ("drawdown", _pm.DD_SCALE),
+        ])
+    except Exception as e:  # noqa: BLE001
+        out.append(f"\n  PORTFOLIO (unavailable: {e})")
+
+    out.append("=" * 66)
+    return out
+
+
+def active_hash() -> str:
+    """The config fingerprint, cached — the ONE accessor engines should use.
+
+    swing_engine and intraday_engine each grew a private _config_hash() with
+    its own cache. A third and fourth copy for meanrev and xsect is how four
+    ATR trails happened. One definition, cached here.
+    """
+    global _HASH_CACHE
+    if _HASH_CACHE is None:
+        try:
+            _HASH_CACHE = config_hash()[0]
+        except Exception:  # noqa: BLE001
+            _HASH_CACHE = "unknown"
+    return _HASH_CACHE
 
 
 def config_hash() -> tuple:
@@ -351,9 +457,17 @@ def validate() -> tuple[int, int]:
                           + (f" — {note}" if note else ""))
 
     # ---- enums ---------------------------------------------------------
+    _bad_enums = []
     for name, allowed in ENUMS.items():
         v = os.getenv(name)
         if v and v.strip().lower() not in {a.lower() for a in allowed}:
+            # BLOCKS ENTRIES (2026-08-13). A typo'd enum used to fall back to
+            # the code default and keep trading — so SWING_V2_MODE=liv would
+            # run the DEFAULT mode while the operator believed they had set
+            # something. The operator's intent is unknown and the fallback is
+            # a guess; guessing about which strategy mode to run is not a
+            # safe default. Existing positions are still managed.
+            _bad_enums.append(f"{name}={v!r}")
             errors.append(f"{name}={v!r} is not one of "
                           f"{sorted(allowed)} — the code will fall back to "
                           f"its default, silently")
@@ -462,6 +576,13 @@ def validate() -> tuple[int, int]:
         _fatal = fatal_invariants()
     except Exception:  # noqa: BLE001
         pass
+    # An invalid enum joins the fatal set: the process boots and manages the
+    # book, but opens nothing new until the value is corrected.
+    if _bad_enums:
+        _fatal = list(_fatal) + [
+            "invalid enum value(s): " + ", ".join(_bad_enums)
+            + " — the intended mode is unknowable, so entries are blocked "
+              "rather than run under a guessed default"]
     ENTRIES_BLOCKED[:] = _fatal
     for f in _fatal:
         errors.append(f"FATAL: {f}")
@@ -529,6 +650,7 @@ def validate() -> tuple[int, int]:
     for name, label in (("PORTFOLIO_HEAT_MAX", "portfolio heat"),
                         ("SECTOR_MAX_PCT", "sector budget"),
                         ("DESK_BUDGET_PCT", "desk capital budget"),
+                        ("SAME_TICKER_MAX_PCT", "same-ticker across desks"),
                         ("CONCENTRATION_TOP_N_MAX", "top-N concentration"),
                         ("MAX_PARTICIPATION_PCT", "liquidity participation")):
         v = _num(name)
