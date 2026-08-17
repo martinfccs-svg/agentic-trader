@@ -376,6 +376,12 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
           n: int = 0, force_market_open=False):
     log.info("=== cycle %d start ===", n)
     _cycle_t0 = time.time()
+    # Cycle-time bands. A slow cycle is not just slow — past the critical
+    # threshold the data underpinning an ENTRY decision is old enough that
+    # acting on it is a guess. Exits still run: they use the position's own
+    # stop, which does not go stale the way a scan does.
+    _CYCLE_WARN = float(os.getenv("CYCLE_WARN_SECS", "5"))
+    _CYCLE_CRIT = float(os.getenv("CYCLE_CRIT_SECS", "10"))
     _health = {"scanned": 0, "routed": 0, "failed": 0, "quarantined": 0}
     # PER-STAGE TIMING (2026-08-06). Cycle duration alone said a cycle took
     # 35s and nothing about WHICH part. Yesterday's log ran a 4.2s median
@@ -396,6 +402,18 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     feed.new_cycle()                     # one fetch per ticker this cycle (rate-limit fix)
     kill.check_emergencies()
     is_open = force_market_open or market_is_open()
+
+    # ---- POSITION MANAGEMENT RUNS FIRST (2026-08-14) -------------------
+    # This block used to sit AFTER the scan and the routing loop. So a stalled
+    # feed inside the scan — the 19-second hang — meant exits, trailing stops
+    # and the EOD flatten never ran that cycle. The system would stop
+    # PROTECTING the book at exactly the moment it was least healthy.
+    #
+    # Protecting what you already hold outranks looking for more to buy. Each
+    # desk is contained separately so one bad book cannot block the others.
+    for e in engines:
+        with _contained(f"manage_{type(e).__name__}", _degraded):
+            e.manage_open_positions()
 
     # Scan only the enabled strategies. Skipping scan_intraday() is what
     # removes the 12-name 1-minute data cost while intraday is benched.
@@ -481,6 +499,15 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             # position management — still runs, because stranding an open
             # book with no manager is worse than not trading.
             _blocked = _entries_blocked()
+            # The previous cycle's duration gates THIS cycle's entries: if the
+            # feed was stalling a moment ago, the prices these signals were
+            # computed from are suspect.
+            _prev = globals().get("_LAST_CYCLE_SECS", 0.0)
+            if _prev >= _CYCLE_CRIT:
+                _blocked = list(_blocked) + [
+                    f"previous cycle took {_prev:.1f}s (critical threshold "
+                    f"{_CYCLE_CRIT:.0f}s) — entry data may be stale; exits and "
+                    f"stop management continue normally"]
             if _blocked:
                 log.critical("ENTRIES BLOCKED — %d signal(s) dropped: %s",
                              len(sigs), "; ".join(_blocked))
@@ -523,10 +550,6 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # Cross-sectional momentum rebalances on its own cadence (not per signal).
     if xsect:
         xsect.maybe_rebalance()
-
-    # Manage every book each cycle (even when entries are halted).
-    for e in engines:
-        e.manage_open_positions()
 
     # swing_v2 candidate strategy, SHADOW-ONLY (2026-07-20): computes real
     # signals against live prices and writes would-be trades to the audit
@@ -627,9 +650,32 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             + (f" | DEGRADED: {','.join(sorted(set(_degraded)))}"
                if _degraded else ""))
 
+    # One JSON snapshot for the dashboard. Contained: a page that cannot be
+    # written must never cost a cycle.
+    with _contained("dashboard", _degraded):
+        import dashboard_export
+        dashboard_export.write_snapshot(
+            broker, cycle_n=n,
+            health={**_health,
+                    "cycle_secs": round(time.time() - _cycle_t0, 2),
+                    "market_open": bool(is_open),
+                    "degraded": sorted(set(_degraded))},
+            funnel=getattr(scanner, "last_funnel", None) or {})
+
     # Persistent failure is a different fact from an intermittent one. This
     # escalates only after DEGRADED_AFTER_CYCLES consecutive failures, and
     # shouts only when a RISK CONTROL is the thing that went blind.
+    _elapsed = time.time() - _cycle_t0
+    globals()["_LAST_CYCLE_SECS"] = _elapsed
+    if _elapsed >= _CYCLE_CRIT:
+        log.critical("CYCLE %d took %.1fs (critical %.0fs) — next cycle's "
+                     "ENTRIES are blocked; exits unaffected. Slowest stages: "
+                     "%s", n, _elapsed, _CYCLE_CRIT,
+                     _stage_text(_stage, _elapsed, 0.0) or "not attributed")
+    elif _elapsed >= _CYCLE_WARN:
+        log.warning("CYCLE %d took %.1fs (warning %.0fs)%s", n, _elapsed,
+                    _CYCLE_WARN, _stage_text(_stage, _elapsed, 0.0))
+
     with _contained("state_tracking", _degraded):
         import system_state
         system_state.note_cycle(_degraded)
