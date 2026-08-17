@@ -308,6 +308,11 @@ def _entries_blocked() -> list:
         return []
 
 
+def _warmup_now(n: int) -> bool:
+    """Is this early enough that a cold cache explains a slow cycle?"""
+    return n <= int(os.getenv("CYCLE_WARMUP_CYCLES", "2"))
+
+
 def _stage_text(stage: dict, total: float, threshold: float = 1.0) -> str:
     """Name the stages that actually cost time. Silent on a fast cycle —
     a heartbeat that prints five numbers every second is a heartbeat nobody
@@ -411,9 +416,10 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     #
     # Protecting what you already hold outranks looking for more to buy. Each
     # desk is contained separately so one bad book cannot block the others.
-    for e in engines:
-        with _contained(f"manage_{type(e).__name__}", _degraded):
-            e.manage_open_positions()
+    with _timed("manage_positions"):
+        for e in engines:
+            with _contained(f"manage_{type(e).__name__}", _degraded):
+                e.manage_open_positions()
 
     # Scan only the enabled strategies. Skipping scan_intraday() is what
     # removes the 12-name 1-minute data cost while intraday is benched.
@@ -503,7 +509,14 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
             # feed was stalling a moment ago, the prices these signals were
             # computed from are suspect.
             _prev = globals().get("_LAST_CYCLE_SECS", 0.0)
-            if _prev >= _CYCLE_CRIT:
+            # WARMUP EXEMPTION (2026-08-17). Cycle 1 populates every cache
+            # from empty — 68 daily-bar series, SPY, quotes for the whole
+            # book — and measured 11.7s against 1.5s for cycle 2 onward. That
+            # is the cache filling, not the feed degrading, and blocking the
+            # first real cycle's entries for it is a false positive on every
+            # single restart.
+            _warmup = n <= int(os.getenv("CYCLE_WARMUP_CYCLES", "2"))
+            if _prev >= _CYCLE_CRIT and not _warmup:
                 _blocked = list(_blocked) + [
                     f"previous cycle took {_prev:.1f}s (critical threshold "
                     f"{_CYCLE_CRIT:.0f}s) — entry data may be stale; exits and "
@@ -549,7 +562,8 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
 
     # Cross-sectional momentum rebalances on its own cadence (not per signal).
     if xsect:
-        xsect.maybe_rebalance()
+        with _timed("xsect_rebalance"):
+            xsect.maybe_rebalance()
 
     # swing_v2 candidate strategy, SHADOW-ONLY (2026-07-20): computes real
     # signals against live prices and writes would-be trades to the audit
@@ -667,11 +681,19 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # shouts only when a RISK CONTROL is the thing that went blind.
     _elapsed = time.time() - _cycle_t0
     globals()["_LAST_CYCLE_SECS"] = _elapsed
-    if _elapsed >= _CYCLE_CRIT:
+    if _elapsed >= _CYCLE_CRIT and _warmup_now(n):
+        log.warning("CYCLE %d took %.1fs — cold-cache warmup, expected on the "
+                    "first cycles after a restart. Entries NOT blocked. %s",
+                    n, _elapsed, _stage_text(_stage, _elapsed, 0.0))
+    elif _elapsed >= _CYCLE_CRIT:
         log.critical("CYCLE %d took %.1fs (critical %.0fs) — next cycle's "
                      "ENTRIES are blocked; exits unaffected. Slowest stages: "
                      "%s", n, _elapsed, _CYCLE_CRIT,
-                     _stage_text(_stage, _elapsed, 0.0) or "not attributed")
+                     _stage_text(_stage, _elapsed, 0.0)
+                     or ("first cycles fill every cache from empty"
+                         if _warmup_now(n) else
+                         "no single stage above 0.2s — the cost is spread "
+                         "across many small feed calls"))
     elif _elapsed >= _CYCLE_WARN:
         log.warning("CYCLE %d took %.1fs (warning %.0fs)%s", n, _elapsed,
                     _CYCLE_WARN, _stage_text(_stage, _elapsed, 0.0))
