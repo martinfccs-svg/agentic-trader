@@ -178,12 +178,26 @@ class FinnhubFeed(_HealthMixin):
             return None
         method = getattr(self._client, ENDPOINTS[key].client_method)
         self._limiter.acquire()
+        _t0 = time.time()
         try:
             r = method(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001
+            _ms = (time.time() - _t0) * 1000
             b.record_failure(getattr(exc, "status_code", None), repr(exc))
+            # Name the endpoint AND the elapsed time. A timeout and a 429 are
+            # different problems with different fixes, and "the feed failed"
+            # does not distinguish them.
+            log.warning("FEED_FAIL endpoint=%s symbol=%s duration_ms=%.0f %s",
+                        key, args[0] if args else "?", _ms,
+                        "TIMEOUT" if "imeout" in repr(exc) else repr(exc)[:80])
             return None
+        _ms = (time.time() - _t0) * 1000
         b.record_success()
+        _slow = float(os.getenv("FEED_SLOW_MS", "1200"))
+        if _ms >= _slow:
+            log.warning("FEED_SLOW endpoint=%s symbol=%s duration_ms=%.0f "
+                        "(threshold %.0f)", key, args[0] if args else "?",
+                        _ms, _slow)
         return r
 
     def _candles(self, ticker, resolution, frm, to) -> Optional[Bars]:
@@ -318,11 +332,51 @@ class SimulatedFeed(_HealthMixin):
                 b.volume.append(round(self._rng.uniform(2_000_000, 8_000_000)))
 
 
+def _timed_client(api_key: str, timeout: float):
+    """A finnhub client whose HTTP calls CANNOT hang.
+
+    THE ROOT CAUSE of the 18-19 second cycles (2026-08-14). finnhub.Client
+    wraps requests.Session, and requests with no `timeout` waits INDEFINITELY
+    — there is no default. So a single slow response blocked the whole cycle:
+    no exit checks, no stop management, no flatten, for as long as the socket
+    stayed open.
+    
+    The rate limiter, circuit breaker and slow-TTL cache were all already
+    here and all worked correctly. None of them could help, because none of
+    them was ever reached: the call had not returned yet. A breaker only
+    trips on a FAILURE, and a hang is not a failure — it is the absence of
+    one.
+    
+    Setting the timeout on the Session applies it to every endpoint at once,
+    including any added later, rather than depending on each call site to
+    remember.
+    """
+    import finnhub
+    c = finnhub.Client(api_key=api_key)
+    try:
+        sess = getattr(c, "_session", None) or getattr(c, "session", None)
+        if sess is not None:
+            _orig = sess.request
+
+            def _request(method, url, **kw):
+                kw.setdefault("timeout", timeout)
+                return _orig(method, url, **kw)
+            sess.request = _request
+            log.info("feed: HTTP timeout set to %.1fs on every request", timeout)
+        else:
+            log.error("feed: could not reach the finnhub session — requests "
+                      "may still hang indefinitely. THIS IS THE 19-SECOND "
+                      "CYCLE BUG; check the finnhub-python version.")
+    except Exception as e:  # noqa: BLE001
+        log.error("feed: could not install the HTTP timeout (%s) — requests "
+                  "may hang", e)
+    return c
+
+
 def build_feed(tickers):
-    from config import FINNHUB_API_KEY
+    from config import FEED_TIMEOUT_SECS, FINNHUB_API_KEY
     if FINNHUB_API_KEY:
-        import finnhub
         log.info("using FinnhubFeed (live data)")
-        return FinnhubFeed(finnhub.Client(api_key=FINNHUB_API_KEY))
+        return FinnhubFeed(_timed_client(FINNHUB_API_KEY, FEED_TIMEOUT_SECS))
     log.warning("FINNHUB_API_KEY unset -> SimulatedFeed (testing only)")
     return SimulatedFeed(tickers)
