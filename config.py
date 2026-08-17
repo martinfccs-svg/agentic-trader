@@ -238,3 +238,10 @@ INTRADAY_UNIVERSE = os.environ.get(
 # instead of every cycle (30 cycles ~= 15 min at 30s cycles). This is what
 # keeps the wider universe inside the Finnhub rate budget.
 DAILY_BARS_REFRESH_CYCLES = _i("DAILY_BARS_REFRESH_CYCLES", 30)
+
+# HARD HTTP TIMEOUT on every outbound market-data request (2026-08-14).
+# requests has NO default timeout, so before this a slow Finnhub response
+# blocked the entire cycle — exit checks, stop management and the EOD flatten
+# all waited on one socket. 2.5s is generous for a healthy endpoint and short
+# enough that a stalled one costs a scan rather than a cycle.
+FEED_TIMEOUT_SECS = _f("FEED_TIMEOUT_SECS", 2.5)
