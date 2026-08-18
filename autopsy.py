@@ -46,6 +46,7 @@ import json
 import os
 import statistics
 import sys
+import tool_guard
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -137,12 +138,6 @@ def load_alpaca_roundtrips() -> list[dict]:
         })
     fills.sort(key=lambda f: f["ts"])
 
-    def system_of(coid: str) -> str | None:
-        if coid.startswith("bot-"):
-            parts = coid.split("-")
-            if len(parts) >= 3:
-                return parts[1]
-        return None
 
     lots: dict[str, list[dict]] = defaultdict(list)   # FIFO open lots
     trades: list[dict] = []
@@ -177,6 +172,22 @@ def load_alpaca_roundtrips() -> list[dict]:
 
 
 # ---------------------------------------------------------------- analysis
+
+def system_of(coid: str) -> str | None:
+    """Which desk owns a client order id, or None if it is not ours.
+
+    Hoisted to module scope 2026-08-07. It was defined INSIDE another
+    function while _exit_path — a module-level function — called it, so any
+    run reaching _exit_path raised NameError. Exactly the shape of the
+    system_state boot crash: a name that resolves in one scope and not in
+    the one that uses it.
+    """
+    if coid and coid.startswith("bot-"):
+        parts = coid.split("-")
+        if len(parts) >= 3:
+            return parts[1]
+    return None
+
 
 def _exit_path(coid: str) -> str:
     """Classify HOW a position closed, from the closing fill's client order id.
@@ -312,6 +323,9 @@ def verdict(trades: list[dict]):
 
 
 def main():
+    # A research tool must never be a container entrypoint: it exits,
+    # and Railway restarts anything that exits. See tool_guard.
+    tool_guard.guard_entrypoint("autopsy.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("audit_file", nargs="?", default="audit.jsonl",
                     help="path to a copy of /data/audit.jsonl")
