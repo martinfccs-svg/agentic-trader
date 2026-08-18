@@ -58,6 +58,7 @@ import math
 import os
 import statistics
 import sys
+import tool_guard
 
 # LINE-BUFFER STDOUT (2026-08-07). Python block-buffers stdout when it is not
 # a TTY — which in a container it never is — so output sits in a 4-8KB buffer
@@ -235,6 +236,9 @@ def replay(px, dates, syms, top_n, lookback, skip, cap, cost, spy_close,
 
 
 def main():
+    # A research tool must never be a container entrypoint: it exits,
+    # and Railway restarts anything that exits. See tool_guard.
+    tool_guard.guard_entrypoint("backtest_xsect.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols-file", default=None,
                     help="optional; omit to read UNIVERSE from config.py")
