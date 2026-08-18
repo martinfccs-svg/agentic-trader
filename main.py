@@ -904,4 +904,24 @@ def run(loop: bool, cycles: int = 40):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true")
-    run(loop=ap.parse_args().loop)
+    _a = ap.parse_args()
+
+    # A FINITE RUN MUST NOT BE A SERVICE (2026-08-18).
+    #
+    # Without --loop, run() executes 40 cycles and returns. The process exits
+    # 0; Railway restarts anything that exits; the trader runs 40 more cycles
+    # and each restart re-runs startup reconciliation against the broker.
+    # That is deployment 80af817f's failure with the trading loop inside it,
+    # and it was one missing flag away from shipping.
+    #
+    # Inside a deployment the loop is not optional, so assume it rather than
+    # obey a start command that forgot it. Local and `railway run` behaviour
+    # is unchanged: no --loop still means a finite 40-cycle run.
+    if not _a.loop and os.getenv("RAILWAY_DEPLOYMENT_ID"):
+        log.critical("started WITHOUT --loop inside a deployment. A finite "
+                     "run would exit after 40 cycles and be restarted "
+                     "forever. Running continuously instead — fix the start "
+                     "command to 'python main.py --loop'.")
+        _a.loop = True
+
+    run(loop=_a.loop)
