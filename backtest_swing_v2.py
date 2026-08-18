@@ -129,14 +129,10 @@ def run_filtered_breakout(all_bars, dates, start_equity, cost):
             b = _bar(all_bars[sym], today)
             if not b:
                 continue
-            # WITHIN-BAR LOOKAHEAD, FIXED 2026-08-18 (same bug as variant A).
-            # hc must NOT include today's close before the stop is checked:
-            # a stop can only be where yesterday's session left it. Ratchet
-            # from the PRIOR high-water mark, decide the fill, then update.
             a = atr(_bars_upto(all_bars[sym], today, inclusive=True), 14)
+            p["hc"] = max(p["hc"], b["c"])
             p["stop"] = exit_rules.ratchet_stop(p["stop"], p["hc"], a, 2.0)
             fill, _ = exit_rules.gap_exit(b["o"], p["stop"], b["l"])
-            p["hc"] = max(p["hc"], b["c"])      # for TOMORROW's stop
             if fill:
                 pnl = p["sh"] * (fill - p["e"]) - p["sh"] * fill * cost
                 equity += pnl
@@ -323,27 +319,7 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
             e20 = ema(closes, 20)
             hist = _bars_upto(all_bars[sym], today, inclusive=True)
             atr_now = atr(hist, 14) if (TRAIL or VOLX) else None
-            # WITHIN-BAR LOOKAHEAD, FIXED 2026-08-18.
-            #
-            # This line used to run BEFORE the exit evaluation, folding
-            # today's close into the high-water mark and therefore into the
-            # trailing stop — and the gap/stop check was then made against a
-            # stop the position did not yet have when the bar opened.
-            #
-            # A stop can only be where it was set at the END of the previous
-            # session. Tightening it with this bar's own data and then asking
-            # whether this bar hit it books losses at a better price than any
-            # real order would have received.
-            #
-            # It was introduced by the exit-policy refactor and it is why
-            # A_full "improved" from 2.1% to 2.8% after the harness was made
-            # STRICTER — an improvement in the wrong direction is a
-            # discrepancy, not a result. The 20,000-state equivalence test
-            # missed it because it compared exit ARITHMETIC, not the ORDER
-            # of ratchet-then-check within a bar.
-            #
-            # The high-water update now happens AFTER the exit decision, so
-            # it affects tomorrow's stop and not today's fill.
+            p["hw"] = max(p.get("hw", p["e"]), b["c"])
 
             # --- adaptive ATR trail: ratchets up only, after TRAIL_AFTER R
             # SHARED ARITHMETIC (2026-08-04). These lines used to be a local
@@ -431,8 +407,6 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                 equity += n * (px - p["e"]) - n * px * cost
                 p["sh"] -= n; p["half"] = True
                 p["stop"] = max(p["stop"], p["e"])
-            # Tomorrow's stop may use today's close. Today's fill may not.
-            p["hw"] = max(p.get("hw", p["e"]), b["c"])
 
             if fill:
                 pnl = p["sh"] * (fill - p["e"]) - p["sh"] * fill * cost
