@@ -302,6 +302,39 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
     CONVICTION = bool(exits.get("conviction", False))
     PCTLOCK = bool(exits.get("percent_lock", False))
     RSX = float(exits.get("rs_exit", 0) or 0)
+    # TIME STOP AS A SWEPT PARAMETER (2026-08-18).
+    #
+    # The diagnosis this tests: A_full runs a 1.27 win/loss ratio at a 39.6%
+    # win rate. A trend strategy at that win rate needs 3-5x winners to be
+    # profitable — it lives entirely on a right tail. Expectancy today is
+    # -31 per trade; at 2.5x it is +117 and at 3.5x it is +237.
+    #
+    # The 15-day time stop exits any position that has not reached +1R in
+    # three weeks. But a trade that becomes a 5R winner routinely spends its
+    # first month going sideways, so the rule removes precisely the trades
+    # that would have run — while losers still exit at the stop. It cuts the
+    # right tail and keeps the left one.
+    #
+    # 0 means NO time stop. That is the hypothesis in its strongest form and
+    # it belongs in the sweep, not in an argument.
+    TSD = int(exits.get("time_stop_days", TIME_STOP_DAYS) or 10**6)
+    # THE 2R PARTIAL, AS AN INDEPENDENT KNOB (2026-08-18).
+    #
+    # It was gated only by `simple_exit`, a positional argument the sweep
+    # always passed as False — so every variant took the partial and the
+    # question "does taking half at +2R cost more than it protects?" could
+    # not be asked at all.
+    #
+    # It is the sharpest question in the strategy. Selling half at +2R
+    # mathematically halves participation in the 4R-8R trades a trend system
+    # depends on, in exchange for locking a modest gain. At a 39.6% win rate
+    # the right tail IS the business, so this may be the single largest
+    # constraint on expectancy.
+    #
+    # PARTIAL_FRAC: 0.5 = current behaviour, 0.25 = keep 75%, 0.0 = keep all.
+    PARTIAL_FRAC = exits.get("partial_frac")
+    if PARTIAL_FRAC is None:
+        PARTIAL_FRAC = 0.0 if simple_exit else 0.5
     ADX_TRAIL = bool(exits.get("adx_trail", False))
     ADXD = float(exits.get("adx_decay", 0) or 0)
     equity = start_equity
@@ -410,7 +443,7 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
                 adx_trail=ADX_TRAIL, staged_lock=STAGED,
                 percent_lock=PCTLOCK,
                 vol_exit_mult=VOLX, adx_decay_frac=ADXD,
-                rs_exit_lag=RSX, time_stop_days=TIME_STOP_DAYS)
+                        rs_exit_lag=RSX, time_stop_days=TSD)
             _ctx = swing_exit_policy.SwingExitContext(
                 entry=p["e"], stop=p["stop"], r=p["r"], high_water=p["hw"],
                 held_days=p["held"], open=b["o"], high=b["h"], low=b["l"],
@@ -425,10 +458,10 @@ def run_config(all_bars, dates, variant, simple_exit, start_equity, cost,
             # would let the replay measure a trade the bot cannot place. It
             # is skipped when the stop already fired, matching the original
             # ordering exactly.
-            if reason not in ("stop", "gap_stop") and not simple_exit \
+            if reason not in ("stop", "gap_stop") and PARTIAL_FRAC > 0 \
                     and not p["half"] and b["h"] >= p["e"] + 2 * p["r"]:
                 px = p["e"] + 2 * p["r"]
-                n = p["sh"] // 2
+                n = int(p["sh"] * PARTIAL_FRAC)
                 equity += n * (px - p["e"]) - n * px * cost
                 p["sh"] -= n; p["half"] = True
                 p["stop"] = max(p["stop"], p["e"])
@@ -666,6 +699,35 @@ EXIT_VARIANTS = [
     ("+ RS decay",    {"rs_exit": 0.05}),
     ("+ conviction",  {"conviction": True}),
     ("+ profit lock",  {"percent_lock": True}),
+    # --- RIGHT-TAIL VARIANTS: does removing the time stop pay? -----------
+    ("time stop 30",   {"time_stop_days": 30}),
+    ("time stop 45",   {"time_stop_days": 45}),
+    ("no time stop",   {"time_stop_days": 0}),
+    # The combination the diagnosis actually predicts: let winners run AND
+    # trail them, so the tail is captured rather than merely permitted.
+    ("run + trail",    {"time_stop_days": 0, "trail_atr": 2.5,
+                        "trail_after_r": 1.0}),
+    ("run + lock",     {"time_stop_days": 0, "percent_lock": True}),
+
+    # --- THE PARTIAL: does locking half at +2R cost the right tail? ------
+    # The direct test. Same config three ways, differing only in how much
+    # is sold at +2R.
+    ("run+trail keep50", {"time_stop_days": 0, "trail_atr": 2.5,
+                          "trail_after_r": 1.0, "partial_frac": 0.5}),
+    ("run+trail keep75", {"time_stop_days": 0, "trail_atr": 2.5,
+                          "trail_after_r": 1.0, "partial_frac": 0.25}),
+    ("run+trail keepALL", {"time_stop_days": 0, "trail_atr": 2.5,
+                           "trail_after_r": 1.0, "partial_frac": 0.0}),
+
+    # --- TRAIL WIDTH: how much room does a trend actually need? ----------
+    # Swept because 2.5 is a guess. A trail too tight recreates the time
+    # stop's problem by other means; too wide gives back the whole move.
+    ("trail 2.0 noTS",  {"time_stop_days": 0, "trail_atr": 2.0,
+                         "trail_after_r": 1.0, "partial_frac": 0.0}),
+    ("trail 3.0 noTS",  {"time_stop_days": 0, "trail_atr": 3.0,
+                         "trail_after_r": 1.0, "partial_frac": 0.0}),
+    ("trail 3.5 noTS",  {"time_stop_days": 0, "trail_atr": 3.5,
+                         "trail_after_r": 1.0, "partial_frac": 0.0}),
 ]
 
 
@@ -746,6 +808,77 @@ def sweep_exits(a):
                     print("  but NOT this has not survived being cherry-picked.")
     except Exception as e:  # noqa: BLE001
         print(f"\n  (reality check unavailable: {e})")
+
+    # ---- RIGHT-TAIL DIAGNOSTIC ------------------------------------------
+    # The single number that decides whether a trend strategy is working. At
+    # a ~40% win rate the breakeven win/loss ratio is 1.5x and a healthy
+    # trend system runs 2.5-3.5x. A_full measured 1.27x, which is not
+    # underperformance — it is structural unprofitability, and no exposure
+    # setting fixes it.
+    print(f"\n{'='*92}\nRIGHT TAIL — is the trend profile intact?\n{'='*92}")
+    print(f"{'configuration':<18}{'win%':>7}{'avg win':>10}{'avg loss':>10}"
+          f"{'W/L':>7}{'expectancy':>12}{'verdict':>26}")
+    print("-" * 92)
+    for _name, _ in EXIT_VARIANTS:
+        _tr = trade_lists.get((max(windows), _name), [])
+        if not _tr:
+            continue
+        _w = [t["pnl"] for t in _tr if t["pnl"] > 0]
+        _l = [t["pnl"] for t in _tr if t["pnl"] <= 0]
+        if not _w or not _l:
+            continue
+        _aw, _al = sum(_w) / len(_w), sum(_l) / len(_l)
+        _wr = len(_w) / len(_tr)
+        _wl = abs(_aw / _al) if _al else 0.0
+        _exp = _wr * _aw + (1 - _wr) * _al
+        _need = (1 - _wr) / _wr if _wr else 99.0
+        _verdict = ("trend profile intact" if _wl >= 2.5 else
+                    "marginal" if _wl >= _need else
+                    f"CANNOT PAY (needs {_need:.1f}x)")
+        print(f"{_name:<18}{_wr:>6.1%}{_aw:>10.0f}{_al:>10.0f}{_wl:>7.2f}"
+              f"{_exp:>+12.0f}{_verdict:>26}")
+    print("-" * 92)
+    print("  A trend strategy pays from a right tail: few large winners fund")
+    print("  many small losses. Below the breakeven ratio a configuration is")
+    print("  structurally unprofitable regardless of its Sharpe on a short")
+    print("  window — and raising exposure only loses faster.")
+
+
+    # ---- CONCENTRATION: is the result one lucky trade? -------------------
+    # The check that separates a repeatable profit engine from a single
+    # NVDA-like outlier. A trend strategy is SUPPOSED to depend on its right
+    # tail — but on the tail as a POPULATION, not on one member of it.
+    #
+    # Removing the best trade should hurt and should not be fatal. If
+    # expectancy flips negative without the single largest winner, the
+    # backtest measured one trade, and the next year will not contain it.
+    print(f"\n{'='*92}\nCONCENTRATION — does the edge survive losing its "
+          f"best trades?\n{'='*92}")
+    print(f"{'configuration':<18}{'all':>11}{'ex-best':>11}{'ex-top3':>11}"
+          f"{'top trade %':>14}{'verdict':>26}")
+    print("-" * 92)
+    for _name, _ in EXIT_VARIANTS:
+        _tr = sorted((t["pnl"] for t in
+                      trade_lists.get((max(windows), _name), [])), reverse=True)
+        if len(_tr) < 10:
+            continue
+        _all = sum(_tr) / len(_tr)
+        _ex1 = sum(_tr[1:]) / (len(_tr) - 1)
+        _ex3 = sum(_tr[3:]) / (len(_tr) - 3) if len(_tr) > 3 else 0.0
+        _gross = sum(x for x in _tr if x > 0) or 1e-9
+        _share = _tr[0] / _gross if _tr[0] > 0 else 0.0
+        if _ex3 > 0:
+            _v = "robust — survives losing 3"
+        elif _ex1 > 0:
+            _v = "fragile — 3 trades carry it"
+        else:
+            _v = "ONE TRADE — not a strategy"
+        print(f"{_name:<18}{_all:>+11.0f}{_ex1:>+11.0f}{_ex3:>+11.0f}"
+              f"{_share:>13.0%} {_v:>26}")
+    print("-" * 92)
+    print("  A configuration whose expectancy flips negative without its best")
+    print("  trade did not find an edge — it found a trade. Prefer a lower")
+    print("  expectancy that survives ex-top3 over a higher one that does not.")
 
     print(f"\n{'='*92}\nKNOWN BIASES IN THIS RESULT\n{'='*92}")
     print("  * Universe is TODAY'S 68 names. A list assembled in 2026 cannot")
@@ -1018,6 +1151,9 @@ WF_CANDIDATES = [
     ("RS decay",    {"rs_exit": 0.05}),
     ("conviction",  {"conviction": True}),
     ("profit lock",  {"percent_lock": True}),
+    ("no time stop", {"time_stop_days": 0}),
+    ("run + trail",  {"time_stop_days": 0, "trail_atr": 2.5,
+                      "trail_after_r": 1.0}),
 ]
 
 
