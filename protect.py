@@ -40,6 +40,7 @@ import argparse
 import json
 import os
 import sys
+import tool_guard
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -180,6 +181,9 @@ def handle(t: str, a) -> str:
 
 
 def main():
+    # A research tool must never be a container entrypoint: it exits,
+    # and Railway restarts anything that exits. See tool_guard.
+    tool_guard.guard_entrypoint("protect.py")
     ap = argparse.ArgumentParser(
         description="Place GTC protective stops or queue closes via the "
                     "Alpaca API. Dry run unless --confirm. Multiple tickers "
@@ -221,4 +225,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
