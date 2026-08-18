@@ -45,6 +45,7 @@ import argparse
 import json
 import math
 import sys
+import tool_guard
 from collections import defaultdict
 
 
@@ -386,6 +387,9 @@ def promotion_report(paired, iters=3000, seed=11, min_n=100):
 
 
 def main():
+    # A research tool must never be a container entrypoint: it exits,
+    # and Railway restarts anything that exits. See tool_guard.
+    tool_guard.guard_entrypoint("calibrate_scores.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("audit_file", nargs="?", default="audit.jsonl")
     ap.add_argument("--system", help="filter to one desk")
