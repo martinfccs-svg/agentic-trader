@@ -32,6 +32,7 @@ import ast
 import builtins
 import re
 import sys
+import tool_guard
 from pathlib import Path
 
 BUILTINS = set(dir(builtins))
@@ -262,7 +263,31 @@ def check_formats(path: Path) -> list:
     return out
 
 
+def check_config_known() -> list:
+    """Variables the LIVE code reads that config_check's KNOWN does not list.
+
+    config_check already reports this at boot, which is the right runtime
+    behaviour — a validator must not halt a trading process over an
+    unregistered variable. But a runtime WARNING is not a development
+    control: it appears after the deploy, in a log, where it competes with
+    everything else for attention.
+
+    Here it is a BUILD FAILURE. An unregistered variable cannot be
+    range-checked or typo-detected, so shipping one means shipping a setting
+    the validator is blind to — and being blind to settings is the exact
+    failure config_check exists to prevent.
+    """
+    try:
+        import config_check
+        return config_check.audit_known() or []
+    except Exception as e:  # noqa: BLE001
+        return [f"could not run config_check.audit_known(): {e}"]
+
+
 def main():
+    # A research tool must never be a container entrypoint: it exits,
+    # and Railway restarts anything that exits. See tool_guard.
+    tool_guard.guard_entrypoint("preship_check.py")
     paths = ([Path(p) for p in sys.argv[1:]] or
              sorted(Path(".").glob("*.py")))
     bad = 0
@@ -274,7 +299,16 @@ def main():
             print(f"\n{p}")
             for i in issues:
                 print(f"  {i}")
-    print(f"\n{len(paths)} file(s) checked, {bad} with problems")
+    unknown = check_config_known()
+    if unknown:
+        bad += 1
+        print("\nconfig_check.KNOWN is missing variables that live code reads")
+        for u in unknown:
+            print(f"  {u}")
+        print("  -> add them to KNOWN so they can be range-checked; an "
+              "unregistered\n     variable is one the validator cannot see.")
+
+    print(f"\n{len(paths)} file(s) checked, {bad} problem group(s)")
     sys.exit(1 if bad else 0)
 
 
