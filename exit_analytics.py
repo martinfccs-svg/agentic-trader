@@ -46,6 +46,7 @@ import argparse
 import json
 import os
 import sys
+import tool_guard
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -140,6 +141,9 @@ def load_trades(path):
 
 
 def main():
+    # A research tool must never be a container entrypoint: it exits,
+    # and Railway restarts anything that exits. See tool_guard.
+    tool_guard.guard_entrypoint("exit_analytics.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("audit_file", nargs="?", default="audit.jsonl")
     ap.add_argument("--system")
