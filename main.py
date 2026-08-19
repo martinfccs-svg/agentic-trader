@@ -314,16 +314,31 @@ def _warmup_now(n: int) -> bool:
 
 
 def _stage_text(stage: dict, total: float, threshold: float = 1.0) -> str:
+    """Name the stages that cost time — and name the SHORTFALL if any.
+
+    The failure this prevents: a 28-second cycle reporting one 1.8s stage and
+    nothing else, leaving 26 seconds silently unaccounted. A timing line that
+    does not add up should SAY it does not add up, otherwise the reader
+    assumes the listed stages are the whole story.
+    """
     """Name the stages that actually cost time. Silent on a fast cycle —
     a heartbeat that prints five numbers every second is a heartbeat nobody
     reads."""
     if not stage or total < threshold:
         return ""
     slow = sorted(((v, k) for k, v in stage.items() if v >= 0.2),
-                  reverse=True)[:3]
-    if not slow:
+                  reverse=True)[:4]
+    parts = [f"{k}={v:.1f}s" for v, k in slow]
+    # UNACCOUNTED TIME. If the measured stages do not explain the cycle, that
+    # gap is the most important number on the line — it is where the next
+    # investigation goes.
+    measured = sum(stage.values())
+    gap = total - measured
+    if gap >= max(1.0, 0.15 * total):
+        parts.append(f"UNMEASURED={gap:.1f}s")
+    if not parts:
         return ""
-    return " | " + " ".join(f"{k}={v:.1f}s" for v, k in slow)
+    return " | " + " ".join(parts)
 
 
 def _signal_quality(sig):
@@ -404,8 +419,13 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
                 _stage[name] = _stage.get(name, 0.0) + (time.time() - s.t)
                 return False
         return _T()
-    feed.new_cycle()                     # one fetch per ticker this cycle (rate-limit fix)
-    kill.check_emergencies()
+    # kill.check_emergencies() reconciles against the BROKER, and the log
+    # showed cycle 961 opening with a PLTR reconcile then a ~22s gap before
+    # anything else. Untimed until now, so it could not be ruled in or out.
+    with _timed("feed_new_cycle"):
+        feed.new_cycle()                 # one fetch per ticker this cycle
+    with _timed("kill_emergencies"):
+        kill.check_emergencies()
     is_open = force_market_open or market_is_open()
 
     # ---- POSITION MANAGEMENT RUNS FIRST (2026-08-14) -------------------
@@ -429,7 +449,19 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
     # and make the results unattributable (2026-08-01).
     _v2_route = os.getenv("SWING_V2_ROUTE", "off").strip().lower() in (
         "on", "true", "1", "yes")
-    with _timed("scan_swing"):
+    # TIMER ON THE WRONG LINE (fixed 2026-08-19).
+    #
+    # `_timed("scan_swing")` wrapped this statement — which returns an EMPTY
+    # LIST whenever SWING_V2_ROUTE=on, i.e. always, in production. So the
+    # only scan timer in the cycle measured a no-op, while the three scans
+    # that actually run were untimed.
+    #
+    # That is why a 28-second cycle reported "manage_positions=1.8s" and
+    # nothing else: 26 seconds went into code no timer covered, and the
+    # watchdog could name the duration but not the cause. Adding stage
+    # timers was the right instinct; the timers existed and were pointed at
+    # the wrong statement.
+    with _timed("scan_swing_v1"):
         swing_sigs = ([] if (_v2_route or not swing) else scanner.scan_swing())
     if _v2_route and swing:
         # Scan and drain BEFORE the routing block below. An earlier wiring
@@ -437,7 +469,8 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
         # produced was silently discarded. Contained: a v2 failure must never
         # cost a cycle.
         try:
-            scan_swing_v2(UNIVERSE, equity=broker.equity)
+            with _timed("scan_swing_v2"):
+                scan_swing_v2(UNIVERSE, equity=broker.equity)
             _v2_sigs = take_pending_signals()
             if _v2_sigs:
                 log.warning("swing_v2 -> engine: %d signal(s) routed",
@@ -445,9 +478,11 @@ def cycle(feed, broker, kill, swing, intraday, meanrev, xsect, router, scanner, 
                 swing_sigs.extend(_v2_sigs)
         except Exception as e:  # noqa: BLE001
             log.error("swing_v2 routed scan failed (non-fatal): %s", e)
-    meanrev_sigs = scanner.scan_meanrev() if meanrev else []
-    intraday_sigs = scanner.scan_intraday() \
-        if (intraday and is_open and not near_close()) else []
+    with _timed("scan_meanrev"):
+        meanrev_sigs = scanner.scan_meanrev() if meanrev else []
+    with _timed("scan_intraday"):
+        intraday_sigs = scanner.scan_intraday() \
+            if (intraday and is_open and not near_close()) else []
     log.info("scan: %d trend, %d meanrev, %d intraday (market_open=%s)",
              len(swing_sigs), len(meanrev_sigs), len(intraday_sigs), is_open)
 
